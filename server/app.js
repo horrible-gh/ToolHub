@@ -8,8 +8,10 @@ import { registrations, validateRegistry, toolIdPattern } from '../tools/registr
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function shell({ title, requestId, current = '', body, assets }) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · ToolHub</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/${assets.css}"></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/">ToolHub</a><nav aria-label="Primary"><a href="/dashboard"${current === 'dashboard' ? ' aria-current="page"' : ''}>Dashboard</a><a href="/tools"${current === 'tools' ? ' aria-current="page"' : ''}>Tools</a></nav></header><main id="main">${body}</main><footer>Request ID: <code>${escapeHtml(requestId)}</code></footer><script type="module" src="/${assets.js}"></script></body></html>`;
+function shell({ title, requestId, current = '', currentTool = '', body, assets, tools }) {
+  const toolLinks = tools.map((tool) => `<a href="/tools/${escapeHtml(tool.id)}"${currentTool === tool.id ? ' aria-current="page"' : ''}>${escapeHtml(tool.name)}</a>`).join('');
+  const rail = `<aside class="tool-rail" aria-label="ToolHub navigation"><a class="brand" href="/">ToolHub</a><nav aria-label="Primary"><a href="/dashboard"${current === 'dashboard' ? ' aria-current="page"' : ''}>Dashboard</a><div class="rail-tools"><span class="rail-heading">Tools</span>${toolLinks}</div><a href="/tools"${current === 'tools' ? ' aria-current="page"' : ''}>All Tools</a></nav></aside>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · ToolHub</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/${assets.css}"></head><body><a class="skip" href="#main">Skip to content</a><div class="workbench">${rail}<div class="workbench-content"><main id="main">${body}</main><footer>Request ID: <code>${escapeHtml(requestId)}</code></footer></div></div><script type="module" src="/${assets.js}"></script></body></html>`;
 }
 
 export function createApp({ tools = registrations, mode = 'development', logger = console } = {}) {
@@ -52,17 +54,17 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     const shown = active.filter((t) => !q || [t.name, t.description, ...t.tags].some((v) => v.toLowerCase().includes(q)));
     const cards = shown.length ? shown.map((t) => `<article class="card"><h2>${escapeHtml(t.name)}</h2><p>${escapeHtml(t.description)}</p><p>${t.tags.map((x) => `<span class="tag">${escapeHtml(x)}</span>`).join(' ')}</p><a href="/tools/${t.id}">Open ${escapeHtml(t.name)}</a></article>`).join('') : '<p role="status">No tools match your search.</p>';
     const body = `<h1>ToolHub Dashboard</h1><form role="search"><label for="q">Search tools</label><input id="q" name="q" value="${escapeHtml(req.query.q || '')}"><button>Search</button></form><section class="grid" aria-label="Available tools">${cards}</section>`;
-    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Dashboard', requestId: req.id, current: 'dashboard', body, assets: manifest }));
+    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Dashboard', requestId: req.id, current: 'dashboard', body, assets: manifest, tools: active }));
   };
   app.get(['/', '/dashboard'], dashboard);
-  app.get('/tools', (req, res) => res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Tools', requestId: req.id, current: 'tools', assets: manifest, body: `<h1>All Tools</h1><div class="grid">${active.map((t) => `<article class="card"><h2>${escapeHtml(t.name)}</h2><p>${escapeHtml(t.description)}</p><a href="/tools/${t.id}">Open</a></article>`).join('')}</div>` })));
+  app.get('/tools', (req, res) => res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Tools', requestId: req.id, current: 'tools', assets: manifest, tools: active, body: `<h1>All Tools</h1><div class="grid">${active.map((t) => `<article class="card"><h2>${escapeHtml(t.name)}</h2><p>${escapeHtml(t.description)}</p><a href="/tools/${t.id}">Open</a></article>`).join('')}</div>` })));
   app.get('/tools/:toolId', (req, res, next) => {
     const id = req.params.toolId.normalize('NFKC');
     if (!toolIdPattern.test(id) || /%|[\\/.]/.test(id)) return next();
     const tool = active.find((t) => t.id === id); if (!tool) return next();
     const body = `<nav aria-label="Breadcrumb"><a href="/tools">Tools</a> / ${escapeHtml(tool.name)}</nav><h1>${escapeHtml(tool.name)}</h1><p>${escapeHtml(tool.description)}</p>${tool.module.render({ requestId: req.id })}`;
-    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: tool.name, requestId: req.id, current: 'tools', body, assets: manifest }));
+    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: tool.name, requestId: req.id, currentTool: tool.id, body, assets: manifest, tools: active }));
   });
-  app.all(/.*/, (req, res) => res.status(404).set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Not found', requestId: req.id, assets: manifest, body: '<h1>Page not found</h1><p>The requested resource is unavailable.</p>' })));
+  app.all(/.*/, (req, res) => res.status(404).set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Not found', requestId: req.id, assets: manifest, tools: active, body: '<h1>Page not found</h1><p>The requested resource is unavailable.</p>' })));
   return app;
 }

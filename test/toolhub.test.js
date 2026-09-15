@@ -30,6 +30,14 @@ test('routes, assets, headers and safe errors', async (t) => {
   assert.match(dashboard, /Sample Tool/);
   assert.match(dashboard, /Random Number/);
   assert.match(tools, /Random Number/);
+  for (const html of [dashboard, tools, random]) {
+    assert.match(html, /<aside class="tool-rail" aria-label="ToolHub navigation">/);
+    assert.match(html, /href="\/tools\/sample-tool"/);
+    assert.match(html, /href="\/tools\/random-number"/);
+  }
+  assert.match(dashboard, /href="\/dashboard" aria-current="page"/);
+  assert.match(tools, /href="\/tools" aria-current="page">All Tools/);
+  assert.match(random, /href="\/tools\/random-number" aria-current="page"/);
   assert.match(random, /data-tool-id="random-number"/);
   assert.match(random, /name="minimum"/);
   assert.match(random, /name="maximum"/);
@@ -38,7 +46,7 @@ test('routes, assets, headers and safe errors', async (t) => {
   assert.doesNotMatch(random, /onclick=|<script(?![^>]* src=)/i);
   assert.match(await (await fetch(base + '/tools/sample-tool')).text(), /Read-only example/);
   for (const route of ['/tools/missing', '/tools/bad--id', '/assets/missing.css', '/assets/%252e%252e/server/app.js']) {
-    const r = await fetch(base + route); assert.equal(r.status, 404); assert.doesNotMatch(await r.text(), /server\/app|Error:|node_modules/);
+    const r = await fetch(base + route); assert.equal(r.status, 404); const html = await r.text(); assert.doesNotMatch(html, /server\/app|Error:|node_modules/); assert.match(html, /class="tool-rail"/);
   }
   assert.equal((await fetch(base + '/tools/%73ample-tool')).status, 200);
   assert.equal((await fetch(base + '/tools/%2573ample-tool')).status, 404);
@@ -51,6 +59,16 @@ test('routes, assets, headers and safe errors', async (t) => {
   fs.rmSync(outsideLink, { force: true }); fs.writeFileSync(outsideFile, 'secret'); fs.symlinkSync(outsideFile, outsideLink, 'file');
   t.after(() => { fs.rmSync(outsideLink, { force: true }); fs.rmSync(outsideFile, { force: true }); });
   assert.equal((await fetch(base + '/assets/outside-root-link.css')).status, 404);
+});
+
+test('workbench rail only exposes active registry tools', async (t) => {
+  const inactive = { id: 'hidden-tool', name: 'Hidden Tool', description: 'Inactive.', tags: [], active: false, module: { render() { return ''; } } };
+  const server = createApp({ tools: [...registrations, inactive], logger: { info() {} } }).listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const dashboard = await (await fetch(base + '/')).text();
+  const notFound = await (await fetch(base + '/missing')).text();
+  assert.doesNotMatch(dashboard, /Hidden Tool|hidden-tool/);
+  assert.doesNotMatch(notFound, /Hidden Tool|hidden-tool/);
 });
 
 test('random number registry metadata is active', () => {
