@@ -38,10 +38,18 @@ export function describeRandomNumberArguments({ minimum, maximum, count, unique 
   return minimum + '–' + maximum + ' ×' + count + (unique ? ' unique' : '');
 }
 
-function historyEntry(toolId, status, summary, outcome, durationMs, input) {
-  const entry = { toolId, status, summary, outcome, createdAt: new Date().toISOString(), input };
+function historyEntry(toolId, status, summary, outcome, durationMs) {
+  const entry = { toolId, status, summary, outcome, createdAt: new Date().toISOString() };
   if (typeof durationMs === 'number' && Number.isFinite(durationMs)) entry.durationMs = Math.max(0, durationMs);
   return entry;
+}
+
+function createMemoryHistoryStore() {
+  let state = null;
+  return {
+    read(fallback) { return state ?? fallback(); },
+    write(value) { state = value; return true; }
+  };
 }
 
 export function initRandomNumber(root) {
@@ -67,8 +75,9 @@ export function initRandomNumber(root) {
   const historyToggle = pick('[data-history-toggle]');
   const historyClear = pick('[data-history-clear]');
   const historyStatus = pick('[data-history-status]');
-  const store = createStorageAdapter(getBrowserStorage('sessionStorage'), 'toolhub:session-history', validHistoryState);
-  let history = store?.read(emptyHistory) ?? emptyHistory();
+  const persistentHistoryStore = createStorageAdapter(getBrowserStorage('sessionStorage'), 'toolhub:session-history', validHistoryState);
+  const store = persistentHistoryStore ?? createMemoryHistoryStore();
+  let history = store.read(emptyHistory);
   let latest = null;
 
   const readInputs = () => {
@@ -79,16 +88,6 @@ export function initRandomNumber(root) {
       count: String(data.get('count') ?? ''),
       unique: data.has('unique')
     };
-  };
-
-  const fill = (input) => {
-    if (!input) return;
-    for (const name of ['minimum', 'maximum', 'count']) {
-      const field = form.querySelector?.('[name="' + name + '"]');
-      if (field && typeof input[name] === 'string') field.value = input[name];
-    }
-    const unique = form.querySelector?.('[name="unique"]');
-    if (unique) unique.checked = input.unique === true;
   };
 
   const entriesForTool = () => history.items.filter((item) => item.toolId === toolId);
@@ -113,29 +112,18 @@ export function initRandomNumber(root) {
       what.append(args, outcome);
       const action = document.createElement('span');
       action.className = 'dact';
-      if (entry.input) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'ghost';
-        button.textContent = entry.status === 'success' ? 'Run again' : 'Load arguments';
-        button.addEventListener('click', () => {
-          fill(entry.input);
-          if (entry.status !== 'success') return;
-          if (typeof form.requestSubmit === 'function') form.requestSubmit();
-          else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-        });
-        action.append(button);
-      }
       item.append(when, what, action);
       return item;
     }));
     if (historyEmpty) historyEmpty.hidden = entries.length !== 0;
-    if (historyMeta) historyMeta.textContent = entries.length + (entries.length === 1 ? ' run' : ' runs') + ' · this session only';
+    if (historyMeta) {
+      historyMeta.textContent = entries.length + (entries.length === 1 ? ' run' : ' runs') +
+        (persistentHistoryStore ? ' · this session only' : ' · in memory only, lost if you leave this page');
+    }
   };
 
-  const record = (status, args, outcome, durationMs, input) => {
-    if (!store) return;
-    history = addHistoryEntry(history, historyEntry(toolId, status, args, outcome, durationMs, input));
+  const record = (status, args, outcome, durationMs) => {
+    history = addHistoryEntry(history, historyEntry(toolId, status, args, outcome, durationMs));
     if (!store.write(history)) return;
     renderHistory();
     if (historyStatus) {
@@ -145,9 +133,12 @@ export function initRandomNumber(root) {
     }
   };
 
-  if (store && drawer) {
+  if (drawer) {
     drawer.hidden = false;
     renderHistory();
+    if (!persistentHistoryStore && historyStatus) {
+      historyStatus.textContent = 'Session storage is unavailable. Runs are kept in memory only and will be lost if you leave this page.';
+    }
     historyToggle?.addEventListener('click', () => {
       const expanded = historyToggle.getAttribute('aria-expanded') === 'true';
       historyToggle.setAttribute('aria-expanded', String(!expanded));
@@ -217,7 +208,7 @@ export function initRandomNumber(root) {
       if (ready) ready.hidden = true;
       if (error) error.hidden = true;
       if (panel) panel.hidden = false;
-      record('success', args, values.join(', '), durationMs, input);
+      record('success', args, described.summary, durationMs);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Unable to generate numbers';
       if (ready) ready.hidden = true;
@@ -225,7 +216,7 @@ export function initRandomNumber(root) {
         error.textContent = message;
         error.hidden = false;
       }
-      record(executionStarted ? 'execution-error' : 'validation-error', args, message, null, input);
+      record(executionStarted ? 'execution-error' : 'validation-error', args, message, null);
     }
   });
 }

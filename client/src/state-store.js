@@ -1,7 +1,5 @@
 export const STATE_VERSION = 2;
 export const HISTORY_LIMIT = 20;
-export const INPUT_KEY_LIMIT = 12;
-export const INPUT_VALUE_LIMIT = 40;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -38,14 +36,6 @@ export function createStorageAdapter(storage, key, validate) {
 
 const validTime = (value) => typeof value === 'string' && !Number.isNaN(Date.parse(value));
 
-export function validRunInput(value) {
-  if (!isObject(value)) return false;
-  const entries = Object.entries(value);
-  if (entries.length > INPUT_KEY_LIMIT) return false;
-  return entries.every(([key, entry]) => key.length <= INPUT_VALUE_LIMIT &&
-    (typeof entry === 'boolean' || (typeof entry === 'string' && entry.length <= INPUT_VALUE_LIMIT)));
-}
-
 export function validHistoryItem(item) {
   if (!isObject(item)) return false;
   if (typeof item.toolId !== 'string' || typeof item.summary !== 'string') return false;
@@ -54,7 +44,6 @@ export function validHistoryItem(item) {
   if (item.toolName !== undefined && typeof item.toolName !== 'string') return false;
   if (item.outcome !== undefined && typeof item.outcome !== 'string') return false;
   if (item.durationMs !== undefined && (typeof item.durationMs !== 'number' || !Number.isFinite(item.durationMs) || item.durationMs < 0)) return false;
-  if (item.input !== undefined && !validRunInput(item.input)) return false;
   return true;
 }
 

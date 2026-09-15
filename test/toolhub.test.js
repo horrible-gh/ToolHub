@@ -437,12 +437,87 @@ test('random work surface reports success, keeps the last result on a validation
 
     const stored = JSON.parse(memory.get('toolhub:session-history'));
     assert.equal(stored.version, 2);
-    assert.deepEqual(stored.items.map(({ status, summary, outcome }) => ({ status, summary, outcome })), [
-      { status: 'success', summary: '7–7 ×1', outcome: '7' },
-      { status: 'validation-error', summary: '7–7 ×0', outcome: 'Count must be at least 1' }
-    ]);
+    assert.equal(stored.items[0].status, 'success');
+    assert.equal(stored.items[0].summary, '7–7 ×1');
+    assert.match(stored.items[0].outcome, /^1 generated · inclusive range 7 to 7/);
+    assert.equal(stored.items[1].status, 'validation-error');
+    assert.equal(stored.items[1].summary, '7–7 ×0');
+    assert.equal(stored.items[1].outcome, 'Count must be at least 1');
     assert.equal(typeof stored.items[0].durationMs, 'number');
-    assert.deepEqual(stored.items[0].input, { minimum: '7', maximum: '7', count: '1', unique: false });
+    assert.equal('input' in stored.items[0], false, 'raw input must not be retained in session history');
+    assert.equal('input' in stored.items[1], false, 'raw input must not be retained in session history');
+  } finally {
+    globalThis.FormData = originalFormData;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    if (originalSession) Object.defineProperty(globalThis, 'sessionStorage', originalSession);
+    else delete globalThis.sessionStorage;
+  }
+});
+
+test('random work surface falls back to in-memory history and warns when sessionStorage is unavailable', () => {
+  const originalFormData = globalThis.FormData;
+  const originalDocument = globalThis.document;
+  const nodes = {
+    form: { values: new Map([['minimum', '1'], ['maximum', '10'], ['count', '1']]), addEventListener(type, listener) { this.submit = listener; }, querySelector() { return null; } },
+    ready: { hidden: false },
+    error: { hidden: true, textContent: '' },
+    panel: { hidden: true },
+    heading: { textContent: '' },
+    summary: { textContent: '' },
+    list: { children: [], replaceChildren(...children) { this.children = children; } },
+    drawer: { hidden: true },
+    historyList: { children: [], replaceChildren(...children) { this.children = children; } },
+    historyEmpty: { hidden: false },
+    historyMeta: { textContent: '' },
+    historyPanel: { hidden: false },
+    historyToggle: { addEventListener() {}, getAttribute() { return 'true'; }, setAttribute() {}, textContent: '' },
+    historyClear: { addEventListener() {} },
+    historyStatus: { textContent: '' }
+  };
+  const selectors = new Map([
+    ['[data-random-form]', nodes.form],
+    ['[data-random-ready]', nodes.ready],
+    ['[data-random-error]', nodes.error],
+    ['[data-random-result]', nodes.panel],
+    ['[data-random-heading]', nodes.heading],
+    ['[data-random-summary]', nodes.summary],
+    ['[data-random-list]', nodes.list],
+    ['[data-history-drawer]', nodes.drawer],
+    ['[data-history-list]', nodes.historyList],
+    ['[data-history-empty]', nodes.historyEmpty],
+    ['[data-history-meta]', nodes.historyMeta],
+    ['[data-history-panel]', nodes.historyPanel],
+    ['[data-history-toggle]', nodes.historyToggle],
+    ['[data-history-clear]', nodes.historyClear],
+    ['[data-history-status]', nodes.historyStatus]
+  ]);
+  class FakeFormData {
+    constructor(form) { this.values = form.values; }
+    get(name) { return this.values.get(name) ?? null; }
+    has(name) { return this.values.has(name); }
+  }
+  globalThis.FormData = FakeFormData;
+  globalThis.document = {
+    createElement() {
+      return { className: '', textContent: '', dateTime: '', append() {}, addEventListener() {}, setAttribute() {} };
+    }
+  };
+  const blockedStorage = { getItem() { return null; }, setItem() { throw new Error('blocked'); }, removeItem() {} };
+  const originalSession = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  Object.defineProperty(globalThis, 'sessionStorage', { value: blockedStorage, configurable: true, writable: true });
+  try {
+    initRandomNumber({
+      dataset: { toolId: 'random-number' },
+      querySelector(selector) { return selectors.get(selector) ?? null; },
+      querySelectorAll() { return []; }
+    });
+    assert.equal(nodes.drawer.hidden, false, 'the drawer still appears with an in-memory fallback');
+    assert.match(nodes.historyStatus.textContent, /memory|lost/i);
+
+    nodes.form.submit({ preventDefault() {} });
+    assert.equal(nodes.historyList.children.length, 1, 'the run is recorded in memory even though sessionStorage is blocked');
+    assert.match(nodes.historyMeta.textContent, /memory|lost/i);
   } finally {
     globalThis.FormData = originalFormData;
     if (originalDocument === undefined) delete globalThis.document;
@@ -507,8 +582,7 @@ test('versioned state adapters recover safely, cap history, and preserve inactiv
     summarizeRuns,
     toggleFavorite,
     validFavoriteState,
-    validHistoryState,
-    validRunInput
+    validHistoryState
   } = await import('../client/src/state-store.js');
   assert.equal(STATE_VERSION, 2);
   const memory = new Map();
@@ -536,10 +610,6 @@ test('versioned state adapters recover safely, cap history, and preserve inactiv
   assert.equal(validHistoryState({ version: 2, items: [{ ...base, durationMs: -1 }] }), false);
   assert.equal(validHistoryState({ version: 2, items: [{ ...base, durationMs: Number.POSITIVE_INFINITY }] }), false);
   assert.equal(validHistoryState({ version: 2, items: [{ ...base, outcome: 7 }] }), false);
-  assert.equal(validHistoryState({ version: 2, items: [{ ...base, input: { minimum: 1 } }] }), false);
-  assert.equal(validHistoryState({ version: 2, items: [{ ...base, input: { minimum: '1', unique: true } }] }), true);
-  assert.equal(validRunInput({ minimum: 'x'.repeat(41) }), false);
-  assert.equal(validRunInput(Object.fromEntries(Array.from({ length: 13 }, (_, i) => ['k' + i, 'v']))), false);
 
   let history = emptyHistory();
   for (let index = 0; index < HISTORY_LIMIT + 2; index += 1) {
