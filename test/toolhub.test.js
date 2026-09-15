@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { createApp } from '../server/app.js';
 import { loadConfig } from '../server/config.js';
+import { describeRandomNumberResult, initRandomNumber } from '../client/src/tools/random-number.js';
 import { registrations, validateRegistry } from '../tools/registry.js';
 import {
   MAX_COUNT,
@@ -42,7 +43,19 @@ test('routes, assets, headers and safe errors', async (t) => {
   assert.match(random, /name="minimum"/);
   assert.match(random, /name="maximum"/);
   assert.match(random, /name="count"/);
+  assert.match(random, /class="random-number-workspace"/);
+  assert.match(random, /aria-labelledby="random-input-heading"/);
+  assert.match(random, /aria-labelledby="random-result-panel-heading"/);
+  assert.match(random, /data-random-ready role="status"/);
+  assert.match(random, /data-random-error role="alert" hidden/);
+  assert.match(random, /data-random-result hidden aria-live="polite" aria-atomic="true"/);
+  assert.match(random, /name="minimum"[^>]*step="1" min="-2147483648" max="2147483647"/);
+  assert.match(random, /name="maximum"[^>]*step="1" min="-2147483648" max="2147483647"/);
+  assert.match(random, /name="count"[^>]*step="1" min="1" max="1000"/);
   assert.match(random, /name="unique"/);
+  assert.match(random, /Unique only/);
+  assert.match(random, /Count cannot exceed the inclusive range size/);
+  assert.match(random, />Generate<\/button>/);
   assert.doesNotMatch(random, /onclick=|<script(?![^>]* src=)/i);
   assert.match(await (await fetch(base + '/tools/sample-tool')).text(), /Read-only example/);
   for (const route of ['/tools/missing', '/tools/bad--id', '/assets/missing.css', '/assets/%252e%252e/server/app.js']) {
@@ -191,4 +204,69 @@ test('registry rejects invalid, duplicate and incomplete tools', () => {
   assert.throws(() => validateRegistry([{ id: 'Bad', name: 'x', description: 'x', tags: [], active: true, module }]));
   assert.throws(() => validateRegistry([{ id: 'a', name: 'x', description: 'x', tags: [], active: true, module }, { id: 'a', name: 'x', description: 'x', tags: [], active: true, module }]));
   assert.throws(() => validateRegistry([{ id: 'a', active: true, module }]));
+});
+
+test('random result description distinguishes singular and plural output', () => {
+  assert.deepEqual(describeRandomNumberResult([7], 7, 7), {
+    heading: 'Result',
+    summary: '1 generated · inclusive range 7 to 7'
+  });
+  assert.deepEqual(describeRandomNumberResult([1, 2], 1, 2), {
+    heading: 'Results',
+    summary: '2 generated · inclusive range 1 to 2'
+  });
+});
+
+test('random work surface transitions from ready to success and then current error', () => {
+  const originalFormData = globalThis.FormData;
+  const originalDocument = globalThis.document;
+  const nodes = {
+    form: { values: new Map([['minimum', '7'], ['maximum', '7'], ['count', '1']]), addEventListener(type, listener) { assert.equal(type, 'submit'); this.submit = listener; } },
+    ready: { hidden: false },
+    error: { hidden: true, textContent: '' },
+    panel: { hidden: true },
+    heading: { textContent: '' },
+    summary: { textContent: '' },
+    list: { children: [], replaceChildren(...children) { this.children = children; } }
+  };
+  const selectors = new Map([
+    ['[data-random-form]', nodes.form],
+    ['[data-random-ready]', nodes.ready],
+    ['[data-random-error]', nodes.error],
+    ['[data-random-result]', nodes.panel],
+    ['[data-random-heading]', nodes.heading],
+    ['[data-random-summary]', nodes.summary],
+    ['[data-random-list]', nodes.list]
+  ]);
+  class FakeFormData {
+    constructor(form) { this.values = form.values; }
+    get(name) { return this.values.get(name) ?? null; }
+    has(name) { return this.values.has(name); }
+  }
+  globalThis.FormData = FakeFormData;
+  globalThis.document = { createElement() { return { textContent: '' }; } };
+  try {
+    initRandomNumber({ querySelector(selector) { return selectors.get(selector); } });
+    const event = { preventDefaultCalled: false, preventDefault() { this.preventDefaultCalled = true; } };
+    nodes.form.submit(event);
+    assert.equal(event.preventDefaultCalled, true);
+    assert.equal(nodes.ready.hidden, true);
+    assert.equal(nodes.error.hidden, true);
+    assert.equal(nodes.panel.hidden, false);
+    assert.equal(nodes.heading.textContent, 'Result');
+    assert.match(nodes.summary.textContent, /1 generated · inclusive range 7 to 7/);
+    assert.deepEqual(nodes.list.children.map((item) => item.textContent), ['7']);
+
+    nodes.form.values.set('count', '0');
+    nodes.form.submit({ preventDefault() {} });
+    assert.equal(nodes.panel.hidden, true);
+    assert.equal(nodes.error.hidden, false);
+    assert.match(nodes.error.textContent, /Count must be at least 1/);
+    assert.equal(nodes.list.children.length, 0);
+    assert.equal(nodes.summary.textContent, '');
+  } finally {
+    globalThis.FormData = originalFormData;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
 });
