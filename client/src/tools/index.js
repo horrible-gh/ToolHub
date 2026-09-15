@@ -4,13 +4,12 @@ const initializers = new Map([['random-number', initRandomNumber]]);
 const initialized = new WeakSet();
 
 export function initTools(root = document) {
-  const elements = [];
-  if (root instanceof Element && root.matches('[data-tool-id]')) elements.push(root);
-  elements.push(...root.querySelectorAll('[data-tool-id]'));
-  for (const element of elements) {
-    const initialize = initializers.get(element.dataset.toolId);
-    if (!initialize || initialized.has(element)) continue;
-    initialized.add(element);
-    initialize(element);
+  const surfaces = [];
+  if (root instanceof Element && root.matches('[data-tool-surface]')) surfaces.push(root);
+  surfaces.push(...root.querySelectorAll('[data-tool-surface]'));
+  for (const surface of surfaces) {
+    if (initialized.has(surface)) continue;
+    initialized.add(surface);
+    initializers.get(surface.dataset.toolId)?.(surface);
   }
 }
