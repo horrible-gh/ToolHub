@@ -88,7 +88,8 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     const id = req.params.toolId.normalize('NFKC');
     if (!toolIdPattern.test(id) || /%|[\\/.]/.test(id)) return next();
     const tool = active.find((t) => t.id === id); if (!tool) return next();
-    const body = `<nav aria-label="Breadcrumb"><a href="/tools">Tools</a> / ${escapeHtml(tool.name)}</nav><h1>${escapeHtml(tool.name)}</h1><p>${escapeHtml(tool.description)}</p>${tool.module.render({ requestId: req.id })}`;
+    const enhancements = `<section class="tool-enhancements" data-tool-id="${escapeHtml(tool.id)}" aria-label="Tool preferences"><button type="button" data-favorite-toggle aria-pressed="false" hidden>Add to favorites</button><span class="visually-hidden" data-favorite-status aria-live="polite"></span>${tool.module.render({ requestId: req.id })}</section>`;
+    const body = `<nav aria-label="Breadcrumb"><a href="/tools">Tools</a> / ${escapeHtml(tool.name)}</nav><h1>${escapeHtml(tool.name)}</h1><p>${escapeHtml(tool.description)}</p>${enhancements}`;
     res.set('Cache-Control', cache('html')).type('html').send(shell({ title: tool.name, requestId: req.id, currentTool: tool.id, body, assets: manifest, tools: active }));
   });
   app.all(/.*/, (req, res) => res.status(404).set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Not found', requestId: req.id, assets: manifest, tools: active, body: '<h1>Page not found</h1><p>The requested resource is unavailable.</p>' })));

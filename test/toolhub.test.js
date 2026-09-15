@@ -270,3 +270,82 @@ test('random work surface transitions from ready to success and then current err
     else globalThis.document = originalDocument;
   }
 });
+
+test('detail enhancements provide closed history and progressively hidden favorite controls', async (t) => {
+  const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  for (const route of ['/tools/random-number', '/tools/sample-tool']) {
+    const html = await (await fetch(base + route)).text();
+    assert.match(html, /data-favorite-toggle aria-pressed="false" hidden/);
+    assert.match(html, /data-favorite-status aria-live="polite"/);
+  }
+  const random = await (await fetch(base + '/tools/random-number')).text();
+  assert.match(random, /data-history-toggle aria-expanded="false" aria-controls="session-run-history" hidden/);
+  assert.match(random, /id="session-run-history" data-history-panel hidden/);
+  assert.match(random, /data-history-empty>No runs in this tab yet/);
+  assert.doesNotMatch(random, /onclick=|<script(?![^>]* src=)/i);
+});
+
+test('versioned state adapters recover safely, cap history, and preserve inactive favorites', async () => {
+  const {
+    HISTORY_LIMIT,
+    addHistoryEntry,
+    createStorageAdapter,
+    emptyFavorites,
+    emptyHistory,
+    toggleFavorite,
+    validFavoriteState,
+    validHistoryState
+  } = await import('../client/src/state-store.js');
+  const memory = new Map();
+  const storage = {
+    getItem(key) { return memory.has(key) ? memory.get(key) : null; },
+    setItem(key, value) { memory.set(key, value); },
+    removeItem(key) { memory.delete(key); }
+  };
+  const historyStore = createStorageAdapter(storage, 'history', validHistoryState);
+  assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
+  memory.set('history', '{"version":999,"items":[]}');
+  assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
+  memory.set('history', '{broken');
+  assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
+
+  let history = emptyHistory();
+  for (let index = 0; index < HISTORY_LIMIT + 2; index += 1) {
+    history = addHistoryEntry(history, {
+      toolId: 'random-number',
+      status: index % 3 === 0 ? 'success' : index % 3 === 1 ? 'validation-error' : 'execution-error',
+      summary: 'safe summary ' + index,
+      createdAt: new Date(2026, 0, 1, 0, 0, index).toISOString()
+    });
+  }
+  assert.equal(history.items.length, HISTORY_LIMIT);
+  assert.equal(history.items[0].summary, 'safe summary 2');
+  assert.deepEqual(new Set(history.items.map(({ status }) => status)),
+    new Set(['success', 'validation-error', 'execution-error']));
+  assert.equal(history.items.some(({ summary }) => summary.includes('result values')), false);
+  assert.equal(historyStore.write(history), true);
+  assert.deepEqual(historyStore.read(emptyHistory), history);
+
+  let favorites = emptyFavorites();
+  favorites = toggleFavorite(favorites, 'random-number', '2026-01-01T00:00:00.000Z');
+  favorites = toggleFavorite(favorites, 'inactive-tool', '2026-01-02T00:00:00.000Z');
+  assert.equal(validFavoriteState(favorites), true);
+  assert.equal(favorites.items.some(({ toolId }) => toolId === 'inactive-tool'), true);
+  favorites = toggleFavorite(favorites, 'random-number', '2026-01-03T00:00:00.000Z');
+  assert.deepEqual(favorites.items.map(({ toolId }) => toolId), ['inactive-tool']);
+
+  const unavailable = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }, removeItem() {} };
+  assert.equal(createStorageAdapter(unavailable, 'state', validFavoriteState), null);
+});
+
+test('state rendering sources use safe DOM APIs without innerHTML', async () => {
+  const stateSource = await fs.promises.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../client/src/state-store.js'), 'utf8');
+  const toolSource = await fs.promises.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../client/src/tools/random-number.js'), 'utf8');
+  const indexSource = await fs.promises.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../client/src/tools/index.js'), 'utf8');
+  for (const source of [stateSource, toolSource, indexSource]) assert.doesNotMatch(source, /innerHTML/);
+  assert.match(toolSource, /textContent/);
+  assert.match(toolSource, /replaceChildren/);
+});

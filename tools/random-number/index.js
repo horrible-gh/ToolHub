@@ -2,7 +2,7 @@ import { MAX_COUNT, MAX_INTEGER, MIN_INTEGER } from './random.js';
 
 export default {
   render() {
-    return '<section class="random-number-tool" data-tool-id="random-number">' +
+    return '<section class="random-number-tool">' +
       '<div class="random-number-workspace">' +
       '<section class="random-number-panel input-panel" aria-labelledby="random-input-heading">' +
       '<div class="panel-heading"><p class="panel-kicker">Input</p><h2 id="random-input-heading">Generation settings</h2><p>Choose an inclusive integer range and how many values to generate.</p></div>' +
@@ -20,6 +20,10 @@ export default {
       '<p class="validation-message" data-random-error role="alert" hidden></p>' +
       '<div data-random-result hidden aria-live="polite" aria-atomic="true">' +
       '<h3 data-random-heading>Result</h3><p class="result-summary" data-random-summary></p>' +
-      '<ol class="result-list" data-random-list></ol></div></section></div></section>';
+      '<ol class="result-list" data-random-list></ol></div></section></div>' +
+      '<section class="history-drawer" aria-labelledby="history-heading"><h2 id="history-heading">Session run history</h2>' +
+      '<button type="button" data-history-toggle aria-expanded="false" aria-controls="session-run-history" hidden>Show session run history</button>' +
+      '<div id="session-run-history" data-history-panel hidden><p data-history-empty>No runs in this tab yet.</p><ol data-history-list></ol></div>' +
+      '<p class="visually-hidden" data-history-status aria-live="polite"></p></section></section>';
   }
 };
