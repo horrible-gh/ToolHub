@@ -1,11 +1,13 @@
 import { generateRandomNumbers } from '../../../tools/random-number/random.js';
 import {
   addHistoryEntry,
+  clearToolHistory,
   createStorageAdapter,
   emptyHistory,
   getBrowserStorage,
   validHistoryState
 } from '../state-store.js';
+import { formatRelativeTime } from '../format.js';
 
 function cryptoUint32() {
   const buffer = new Uint32Array(1);
@@ -18,103 +20,212 @@ function parseInteger(value) {
   return Number(value);
 }
 
-export function describeRandomNumberResult(values, min, max) {
+function now() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+export function describeRandomNumberResult(values, min, max, unique = false, durationMs = null) {
+  const parts = [values.length + ' generated', 'inclusive range ' + min + ' to ' + max];
+  if (unique) parts.push('unique');
+  if (typeof durationMs === 'number' && Number.isFinite(durationMs)) parts.push(Math.max(0, Math.round(durationMs)) + 'ms');
   return {
     heading: values.length === 1 ? 'Result' : 'Results',
-    summary: values.length + ' generated · inclusive range ' + min + ' to ' + max
+    summary: parts.join(' · ')
   };
 }
 
-function historyEntry(toolId, status, summary) {
-  return { toolId, status, summary, createdAt: new Date().toISOString() };
+export function describeRandomNumberArguments({ minimum, maximum, count, unique }) {
+  return minimum + '–' + maximum + ' ×' + count + (unique ? ' unique' : '');
+}
+
+function historyEntry(toolId, status, summary, outcome, durationMs, input) {
+  const entry = { toolId, status, summary, outcome, createdAt: new Date().toISOString(), input };
+  if (typeof durationMs === 'number' && Number.isFinite(durationMs)) entry.durationMs = Math.max(0, durationMs);
+  return entry;
 }
 
 export function initRandomNumber(root) {
-  const form = root.querySelector('[data-random-form]');
-  const ready = root.querySelector('[data-random-ready]');
-  const error = root.querySelector('[data-random-error]');
-  const panel = root.querySelector('[data-random-result]');
-  const heading = root.querySelector('[data-random-heading]');
-  const summary = root.querySelector('[data-random-summary]');
-  const list = root.querySelector('[data-random-list]');
-  const historyButton = root.querySelector('[data-history-toggle]');
-  const historyPanel = root.querySelector('[data-history-panel]');
-  const historyList = root.querySelector('[data-history-list]');
-  const historyEmpty = root.querySelector('[data-history-empty]');
-  const historyStatus = root.querySelector('[data-history-status]');
-  const historyStore = createStorageAdapter(getBrowserStorage('sessionStorage'), 'toolhub:session-history', validHistoryState);
-  let history = historyStore?.read(emptyHistory) ?? emptyHistory();
+  const pick = (selector) => root.querySelector(selector);
+  const form = pick('[data-random-form]');
+  if (!form) return;
+  const toolId = root.dataset?.toolId ?? 'random-number';
+  const ready = pick('[data-random-ready]');
+  const error = pick('[data-random-error]');
+  const panel = pick('[data-random-result]');
+  const heading = pick('[data-random-heading]');
+  const summary = pick('[data-random-summary]');
+  const list = pick('[data-random-list]');
+  const jsonBox = pick('[data-random-json]');
+  const jsonToggle = pick('[data-random-json-toggle]');
+  const copyStatus = pick('[data-random-copy-status]');
+  const copyButtons = [...(root.querySelectorAll?.('[data-random-copy]') ?? [])];
+  const drawer = pick('[data-history-drawer]');
+  const historyList = pick('[data-history-list]');
+  const historyEmpty = pick('[data-history-empty]');
+  const historyMeta = pick('[data-history-meta]');
+  const historyPanel = pick('[data-history-panel]');
+  const historyToggle = pick('[data-history-toggle]');
+  const historyClear = pick('[data-history-clear]');
+  const historyStatus = pick('[data-history-status]');
+  const store = createStorageAdapter(getBrowserStorage('sessionStorage'), 'toolhub:session-history', validHistoryState);
+  let history = store?.read(emptyHistory) ?? emptyHistory();
+  let latest = null;
+
+  const readInputs = () => {
+    const data = new FormData(form);
+    return {
+      minimum: String(data.get('minimum') ?? ''),
+      maximum: String(data.get('maximum') ?? ''),
+      count: String(data.get('count') ?? ''),
+      unique: data.has('unique')
+    };
+  };
+
+  const fill = (input) => {
+    if (!input) return;
+    for (const name of ['minimum', 'maximum', 'count']) {
+      const field = form.querySelector?.('[name="' + name + '"]');
+      if (field && typeof input[name] === 'string') field.value = input[name];
+    }
+    const unique = form.querySelector?.('[name="unique"]');
+    if (unique) unique.checked = input.unique === true;
+  };
+
+  const entriesForTool = () => history.items.filter((item) => item.toolId === toolId);
 
   const renderHistory = () => {
-    const entries = history.items.filter((item) => item.toolId === root.dataset.toolId);
-    historyList.replaceChildren(...entries.slice().reverse().map((entry) => {
+    if (!historyList || !drawer) return;
+    const entries = entriesForTool().slice().reverse();
+    historyList.replaceChildren(...entries.map((entry) => {
       const item = document.createElement('li');
-      const state = document.createElement('strong');
-      const detail = document.createElement('span');
-      const time = document.createElement('time');
-      state.textContent = entry.status === 'success' ? 'Success' :
-        entry.status === 'validation-error' ? 'Validation error' : 'Execution error';
-      detail.textContent = entry.summary;
-      time.dateTime = entry.createdAt;
-      time.textContent = new Date(entry.createdAt).toLocaleTimeString();
-      item.append(state, detail, time);
+      item.className = 'drow';
+      const when = document.createElement('time');
+      when.className = 'dwhen';
+      when.dateTime = entry.createdAt;
+      when.textContent = formatRelativeTime(entry.createdAt);
+      const what = document.createElement('span');
+      what.className = 'dwhat';
+      const args = document.createElement('span');
+      args.textContent = (entry.summary || '—') + ' → ';
+      const outcome = document.createElement('span');
+      outcome.className = entry.status === 'success' ? 'o' : 'bad';
+      outcome.textContent = entry.outcome || (entry.status === 'success' ? '' : 'failed');
+      what.append(args, outcome);
+      const action = document.createElement('span');
+      action.className = 'dact';
+      if (entry.input) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ghost';
+        button.textContent = entry.status === 'success' ? 'Run again' : 'Load arguments';
+        button.addEventListener('click', () => {
+          fill(entry.input);
+          if (entry.status !== 'success') return;
+          if (typeof form.requestSubmit === 'function') form.requestSubmit();
+          else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        });
+        action.append(button);
+      }
+      item.append(when, what, action);
       return item;
     }));
-    historyEmpty.hidden = entries.length !== 0;
-  };
-  const record = (status, text) => {
-    if (!historyStore) return;
-    history = addHistoryEntry(history, historyEntry(root.dataset.toolId, status, text));
-    if (!historyStore.write(history)) return;
-    if (!historyPanel.hidden) renderHistory();
-    historyStatus.textContent = status === 'success' ? 'Run added to session history.' :
-      status === 'validation-error' ? 'Validation error added to session history.' :
-        'Execution error added to session history.';
+    if (historyEmpty) historyEmpty.hidden = entries.length !== 0;
+    if (historyMeta) historyMeta.textContent = entries.length + (entries.length === 1 ? ' run' : ' runs') + ' · this session only';
   };
 
-  if (historyStore && historyButton && historyPanel) {
-    historyButton.hidden = false;
-    historyButton.addEventListener('click', () => {
-      const expanded = historyButton.getAttribute('aria-expanded') === 'true';
-      historyButton.setAttribute('aria-expanded', String(!expanded));
-      historyPanel.hidden = expanded;
-      if (!expanded) renderHistory();
+  const record = (status, args, outcome, durationMs, input) => {
+    if (!store) return;
+    history = addHistoryEntry(history, historyEntry(toolId, status, args, outcome, durationMs, input));
+    if (!store.write(history)) return;
+    renderHistory();
+    if (historyStatus) {
+      historyStatus.textContent = status === 'success' ? 'Run added to session history.'
+        : status === 'validation-error' ? 'Validation error added to session history.'
+          : 'Execution error added to session history.';
+    }
+  };
+
+  if (store && drawer) {
+    drawer.hidden = false;
+    renderHistory();
+    historyToggle?.addEventListener('click', () => {
+      const expanded = historyToggle.getAttribute('aria-expanded') === 'true';
+      historyToggle.setAttribute('aria-expanded', String(!expanded));
+      historyToggle.textContent = expanded ? 'Expand' : 'Collapse';
+      if (historyPanel) historyPanel.hidden = expanded;
+    });
+    historyClear?.addEventListener('click', () => {
+      history = clearToolHistory(history, toolId);
+      if (!store.write(history)) return;
+      renderHistory();
+      if (historyStatus) historyStatus.textContent = 'Session history cleared.';
+    });
+  }
+
+  const canCopy = typeof navigator !== 'undefined' && Boolean(navigator.clipboard?.writeText);
+  for (const button of copyButtons) {
+    if (!canCopy) continue;
+    button.hidden = false;
+    button.addEventListener('click', () => {
+      if (!latest) return;
+      const text = button.dataset.randomCopy === 'csv'
+        ? ['value', ...latest.values].join('\n')
+        : latest.values.join(', ');
+      navigator.clipboard.writeText(text)
+        .then(() => { if (copyStatus) copyStatus.textContent = 'Copied to the clipboard.'; })
+        .catch(() => { if (copyStatus) copyStatus.textContent = 'Copying failed.'; });
+    });
+  }
+
+  if (jsonToggle && jsonBox) {
+    jsonToggle.hidden = false;
+    jsonToggle.addEventListener('click', () => {
+      const expanded = jsonToggle.getAttribute('aria-expanded') === 'true';
+      jsonToggle.setAttribute('aria-expanded', String(!expanded));
+      jsonToggle.textContent = expanded ? 'Show JSON' : 'Hide JSON';
+      jsonBox.hidden = expanded;
     });
   }
 
   form.addEventListener('submit', (event) => {
     event.preventDefault();
+    const input = readInputs();
+    const args = describeRandomNumberArguments(input);
     let executionStarted = false;
+    const started = now();
     try {
-      const data = new FormData(form);
-      const min = parseInteger(String(data.get('minimum') ?? ''));
-      const max = parseInteger(String(data.get('maximum') ?? ''));
-      const count = parseInteger(String(data.get('count') ?? ''));
+      const min = parseInteger(input.minimum);
+      const max = parseInteger(input.maximum);
+      const count = parseInteger(input.count);
       const values = generateRandomNumbers(
-        { min, max, count, unique: data.has('unique') },
+        { min, max, count, unique: input.unique },
         () => { executionStarted = true; return cryptoUint32(); }
       );
-      const result = describeRandomNumberResult(values, min, max);
-      list.replaceChildren(...values.map((value) => {
-        const item = document.createElement('li');
-        item.textContent = String(value);
-        return item;
-      }));
-      heading.textContent = result.heading;
-      summary.textContent = result.summary;
-      ready.hidden = true;
-      error.hidden = true;
-      panel.hidden = false;
-      record('success', result.summary);
+      const durationMs = now() - started;
+      const described = describeRandomNumberResult(values, min, max, input.unique, durationMs);
+      latest = { values, min, max, count, unique: input.unique };
+      if (list) {
+        list.replaceChildren(...values.map((value) => {
+          const item = document.createElement('li');
+          item.textContent = String(value);
+          return item;
+        }));
+      }
+      if (heading) heading.textContent = described.heading;
+      if (summary) summary.textContent = described.summary;
+      if (jsonBox) jsonBox.textContent = JSON.stringify(latest, null, 2);
+      if (ready) ready.hidden = true;
+      if (error) error.hidden = true;
+      if (panel) panel.hidden = false;
+      record('success', args, values.join(', '), durationMs, input);
     } catch (caught) {
-      ready.hidden = true;
-      panel.hidden = true;
-      list.replaceChildren();
-      summary.textContent = '';
-      error.textContent = caught instanceof Error ? caught.message : 'Unable to generate numbers';
-      error.hidden = false;
-      record(executionStarted ? 'execution-error' : 'validation-error',
-        executionStarted ? 'The number generator could not complete.' : 'Check the generation settings.');
+      const message = caught instanceof Error ? caught.message : 'Unable to generate numbers';
+      if (ready) ready.hidden = true;
+      if (error) {
+        error.textContent = message;
+        error.hidden = false;
+      }
+      record(executionStarted ? 'execution-error' : 'validation-error', args, message, null, input);
     }
   });
 }

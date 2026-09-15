@@ -3,43 +3,191 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import { registrations, validateRegistry, toolIdPattern } from '../tools/registry.js';
+import { registrations, validateRegistry, toolIdPattern, groupTools, tagCounts, toolIcon, closestToolId } from '../tools/registry.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const normalize = (value) => String(value ?? '').normalize('NFKC').trim().toLowerCase();
 
-function searchTools(tools, value) {
-  const raw = String(value ?? '');
-  const query = raw.normalize('NFKC').trim().toLowerCase();
-  const matches = tools.filter((tool) => !query || [tool.name, tool.description, ...tool.tags]
-    .some((field) => String(field).normalize('NFKC').toLowerCase().includes(query)));
-  return { raw, query, matches };
+export function filterTools(tools, { q, tag } = {}) {
+  const rawQuery = String(q ?? '');
+  const rawTag = String(tag ?? '');
+  const query = normalize(rawQuery);
+  const tagQuery = normalize(rawTag);
+  const matches = tools.filter((tool) => {
+    const textMatch = !query || [tool.name, tool.description, tool.id, ...tool.tags].some((field) => normalize(field).includes(query));
+    const tagMatch = !tagQuery || tool.tags.some((value) => normalize(value) === tagQuery);
+    return textMatch && tagMatch;
+  });
+  return { rawQuery, rawTag, query, tag: tagQuery, matches };
 }
 
-function renderSearchForm(raw, action) {
-  return `<form class="tool-search" role="search" action="${action}"><label for="q">Search by name, description, or tag</label><div><input id="q" name="q" value="${escapeHtml(raw)}"><button>Search</button></div></form>`;
+function railSearch(rawQuery) {
+  return '<form class="railsearch" role="search" action="/tools" method="get">' +
+    '<span class="railsearch-icon" aria-hidden="true">&#9906;</span>' +
+    '<label class="visually-hidden" for="rail-search">Search tools</label>' +
+    `<input id="rail-search" name="q" type="search" autocomplete="off" placeholder="Search tools" value="${escapeHtml(rawQuery)}" data-rail-search>` +
+    '<kbd class="railsearch-kbd" aria-hidden="true" data-rail-kbd hidden>Ctrl K</kbd>' +
+    '<button class="railsearch-submit" type="submit">Search</button></form>';
 }
 
-function renderToolResults({ tools, query, total, clearPath, format }) {
-  if (total === 0) return '<p class="empty-state" role="status">No active tools are registered.</p>';
-  if (tools.length === 0) return `<div class="empty-state" role="status"><p>No tools match your search.</p><p><a href="${clearPath}">Clear search and show all tools</a></p></div>`;
-  const tags = (tool) => tool.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join(' ');
-  if (format === 'table') {
-    const rows = tools.map((tool) => `<tr><th scope="row"><a href="/tools/${escapeHtml(tool.id)}">${escapeHtml(tool.name)}</a></th><td>${escapeHtml(tool.description)}</td><td>${tags(tool)}</td><td><code>${escapeHtml(tool.id)}</code></td></tr>`).join('');
-    return `<div class="tool-table-wrap"><table class="tool-table"><caption>${query ? `${tools.length} matching active tools` : `${total} active tools`}</caption><thead><tr><th scope="col">Name</th><th scope="col">Description</th><th scope="col">Tags</th><th scope="col">ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+function railItem(tool, currentTool) {
+  const current = currentTool === tool.id ? ' aria-current="page"' : '';
+  return `<li class="rail-item" data-rail-item data-tool-id="${escapeHtml(tool.id)}" data-tool-name="${escapeHtml(tool.name)}">` +
+    `<a href="/tools/${escapeHtml(tool.id)}"${current}><span class="ico" aria-hidden="true">${escapeHtml(toolIcon(tool))}</span>` +
+    `<span class="rail-name">${escapeHtml(tool.name)}</span>` +
+    '<span class="star" data-rail-star hidden aria-hidden="true">&#9733;</span></a></li>';
+}
+
+function renderRail({ tools, total, current, currentTool, requestId, rawQuery }) {
+  const groups = groupTools(tools).map(({ group, items }, index) => {
+    const id = `rail-group-${index}`;
+    return `<h2 class="rgroup" id="${id}">${escapeHtml(group)} <span class="n">${items.length}</span></h2>` +
+      `<ul class="rail-list" aria-labelledby="${id}">${items.map((tool) => railItem(tool, currentTool)).join('')}</ul>`;
+  }).join('');
+  const pinned = '<h2 class="rgroup" id="rail-group-pinned" data-rail-pinned-heading hidden>Pinned <span class="n" data-rail-pinned-count>0</span></h2>' +
+    '<ul class="rail-list" aria-labelledby="rail-group-pinned" data-rail-pinned hidden></ul>';
+  const browse = '<h2 class="rgroup" id="rail-group-browse">Browse</h2>' +
+    `<ul class="rail-list" aria-labelledby="rail-group-browse"><li><a href="/dashboard"${current === 'dashboard' ? ' aria-current="page"' : ''}><span class="ico" aria-hidden="true">&#8962;</span><span class="rail-name">Home</span></a></li>` +
+    `<li><a href="/tools"${current === 'tools' ? ' aria-current="page"' : ''}><span class="ico" aria-hidden="true">&#9636;</span><span class="rail-name">All tools</span></a></li></ul>`;
+  const empty = tools.length === 0
+    ? '<p class="rail-empty">No active tools are registered.</p>'
+    : '<p class="rail-empty" data-rail-empty hidden>No tools match that search.</p>';
+  return '<aside class="rail" aria-label="ToolHub navigation">' +
+    '<a class="brand" href="/"><span class="mk" aria-hidden="true">TH</span>ToolHub</a>' +
+    railSearch(rawQuery) +
+    `<nav class="rail-nav" aria-label="Tools">${pinned}${groups}${empty}</nav>` +
+    `<nav class="rail-browse" aria-label="Primary">${browse}</nav>` +
+    `<p class="railfoot">Request ID: <code>${escapeHtml(requestId)}</code><span class="railfoot-line">${total} registered &middot; ${tools.length} active</span></p></aside>`;
+}
+
+function renderTopbar(crumbs, actions = '') {
+  const parts = crumbs.map((crumb) => {
+    const label = crumb.mono ? `<code>${escapeHtml(crumb.label)}</code>` : escapeHtml(crumb.label);
+    return crumb.href ? `<a href="${escapeHtml(crumb.href)}">${label}</a>` : `<span aria-current="page">${label}</span>`;
+  });
+  return '<div class="topbar"><nav class="crumb" aria-label="Breadcrumb">' +
+    parts.join('<span class="crumb-sep" aria-hidden="true">/</span>') +
+    `</nav><span class="spacer"></span><div class="topbar-actions">${actions}</div></div>`;
+}
+
+function shell({ title, requestId, current = '', currentTool = '', body, topbar, assets, tools, total, rawQuery = '' }) {
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    `<title>${escapeHtml(title)} &middot; ToolHub</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/${assets.css}"></head><body>` +
+    '<a class="skip" href="#main">Skip to content</a><div class="app">' +
+    renderRail({ tools, total, current, currentTool, requestId, rawQuery }) +
+    `<div class="content">${topbar}<main id="main" class="pane">${body}</main></div></div>` +
+    `<script type="module" src="/${assets.js}"></script></body></html>`;
+}
+
+function statCard(label, value, detail, { valueAttr = '', detailAttr = '', text = false } = {}) {
+  return `<div class="stat"><p class="k">${label}</p><p class="v${text ? ' v-text' : ''}"${valueAttr ? ' ' + valueAttr : ''}>${value}</p><p class="s"${detailAttr ? ' ' + detailAttr : ''}>${detail}</p></div>`;
+}
+
+function renderHome({ active, total }) {
+  const inactive = total - active.length;
+  const stats = '<div class="statrow">' +
+    statCard('Registered tools', String(active.length), `${active.length} active &middot; ${inactive} inactive`) +
+    statCard('Runs this session', '0', '0 succeeded &middot; 0 failed', { valueAttr: 'data-stat-runs', detailAttr: 'data-stat-runs-detail' }) +
+    statCard('Last run', 'None yet', 'Run a tool to start the session log.', { valueAttr: 'data-stat-last', detailAttr: 'data-stat-last-detail', text: true }) +
+    statCard('Average run', '&mdash;', 'No timed runs yet', { valueAttr: 'data-stat-average', detailAttr: 'data-stat-average-detail', text: true }) +
+    '</div>';
+  const resume = '<h2 class="sectitle" id="resume-heading">Pick up where you left off <span class="rule" aria-hidden="true"></span></h2>' +
+    '<div class="card"><table class="tbl" aria-labelledby="resume-heading" data-resume-table hidden>' +
+    '<thead><tr><th scope="col">Tool</th><th scope="col">Arguments</th><th scope="col">Result</th><th scope="col">When</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>' +
+    '<tbody data-resume-body></tbody></table>' +
+    '<p class="empty-row" data-resume-empty>No runs recorded in this browser session yet. Open a tool from the rail to start one.</p></div>';
+  return `<h1>Workbench</h1><p class="lede">Pick a tool in the rail and run it right here. The rail never leaves, so switching tools never costs a page you have to find again.</p>${stats}${resume}` +
+    '<p class="summary">Run history and pins stay in this browser. Nothing about a run is sent to the server.</p>';
+}
+
+function renderToolsTable({ total, matched, query, tag }) {
+  if (total === 0) return '<div class="card"><p class="empty-row" role="status">No active tools are registered.</p></div>';
+  if (matched.length === 0) {
+    return '<div class="card"><div class="empty-row" role="status"><p>No tools match your search.</p>' +
+      '<p><a href="/tools">Clear search and show all tools</a></p></div></div>';
   }
-  const items = tools.map((tool) => `<li><a href="/tools/${escapeHtml(tool.id)}">${escapeHtml(tool.name)}</a><span>${escapeHtml(tool.description)}</span><span class="tool-tags">${tags(tool)}</span></li>`).join('');
-  return `<ul class="tool-results" aria-label="${query ? 'Matching tools' : 'Active tools'}">${items}</ul>`;
+  const rows = matched.map((tool) => {
+    const tags = tool.tags.map((value) => `<a class="tag" href="/tools?tag=${encodeURIComponent(value)}">${escapeHtml(value)}</a>`).join('');
+    return `<tr data-tool-row data-tool-id="${escapeHtml(tool.id)}" data-tool-name="${escapeHtml(tool.name)}">` +
+      `<td class="col-star"><button type="button" class="starbtn" data-pin-toggle data-tool-id="${escapeHtml(tool.id)}" aria-pressed="false" hidden><span class="starmark" aria-hidden="true">&#9734;</span><span class="visually-hidden">Pin ${escapeHtml(tool.name)}</span></button></td>` +
+      `<th scope="row"><a class="nm" href="/tools/${escapeHtml(tool.id)}">${escapeHtml(tool.name)}</a><span class="dsc">${escapeHtml(tool.description)}</span></th>` +
+      `<td>${tags}</td><td class="mono">${escapeHtml(tool.id)}</td>` +
+      '<td class="mono" data-tool-lastused>&mdash;</td>' +
+      `<td class="go"><a href="/tools/${escapeHtml(tool.id)}">Open &rarr;</a></td></tr>`;
+  }).join('');
+  const caption = query || tag ? `${matched.length} matching active tools` : `${total} active tools`;
+  return '<div class="card"><table class="tbl" data-tools-table>' +
+    `<caption class="visually-hidden">${escapeHtml(caption)}</caption>` +
+    '<thead><tr><th scope="col" class="col-star"><span class="visually-hidden">Pinned</span></th>' +
+    '<th scope="col">Tool</th><th scope="col">Tags</th><th scope="col">ID</th><th scope="col">Last used</th>' +
+    '<th scope="col"><span class="visually-hidden">Open</span></th></tr></thead>' +
+    `<tbody>${rows}</tbody></table></div>`;
 }
 
-function shell({ title, requestId, current = '', currentTool = '', body, assets, tools }) {
-  const toolLinks = tools.map((tool) => `<a href="/tools/${escapeHtml(tool.id)}"${currentTool === tool.id ? ' aria-current="page"' : ''}>${escapeHtml(tool.name)}</a>`).join('');
-  const rail = `<aside class="tool-rail" aria-label="ToolHub navigation"><a class="brand" href="/">ToolHub</a><nav aria-label="Primary"><a href="/dashboard"${current === 'dashboard' ? ' aria-current="page"' : ''}>Dashboard</a><div class="rail-tools"><span class="rail-heading">Tools</span>${toolLinks}</div><a href="/tools"${current === 'tools' ? ' aria-current="page"' : ''}>All Tools</a></nav></aside>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · ToolHub</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/${assets.css}"></head><body><a class="skip" href="#main">Skip to content</a><div class="workbench">${rail}<div class="workbench-content"><main id="main">${body}</main><footer>Request ID: <code>${escapeHtml(requestId)}</code></footer></div></div><script type="module" src="/${assets.js}"></script></body></html>`;
+function renderTools({ active, result }) {
+  const chipHref = (tag) => {
+    const params = new URLSearchParams();
+    if (result.rawQuery) params.set('q', result.rawQuery);
+    if (tag) params.set('tag', tag);
+    const query = params.toString();
+    return query ? `/tools?${query}` : '/tools';
+  };
+  const chips = [`<a class="chip${result.tag ? '' : ' on'}" href="${escapeHtml(chipHref(''))}">All ${active.length}</a>`]
+    .concat(tagCounts(active).map(({ tag, count }) => {
+      const on = result.tag === normalize(tag) ? ' on' : '';
+      return `<a class="chip${on}" href="${escapeHtml(chipHref(tag))}"${on ? ' aria-current="page"' : ''}>#${escapeHtml(tag)} ${count}</a>`;
+    }))
+    .join('');
+  const filters = `<div class="filters">${chips}<span class="spacer"></span>` +
+    '<label class="sortlabel" for="tools-sort" data-tools-sort-label hidden>Sort</label>' +
+    '<select id="tools-sort" data-tools-sort hidden><option value="name">Name</option><option value="recent">Recently used</option><option value="pinned">Pinned first</option></select></div>';
+  const lede = result.query || result.tag
+    ? `${result.matches.length} of ${active.length} tools match`
+    : `${active.length} ${active.length === 1 ? 'tool' : 'tools'} · ${active.length} active`;
+  return `<h1>All tools</h1><p class="lede">${escapeHtml(lede)}</p>${filters}` +
+    renderToolsTable({ total: active.length, matched: result.matches, query: result.query, tag: result.tag }) +
+    '<p class="summary">Search and tag chips combine with AND. The same table keeps working as tools are added.</p>';
+}
+
+function renderDetail(tool, requestId) {
+  const tags = tool.tags.map((value) => `<span class="tag">${escapeHtml(value)}</span>`).join('');
+  return `<h1>${escapeHtml(tool.name)}</h1><p class="lede">${escapeHtml(tool.description)} ${tags}</p>` +
+    `<div class="tool-surface" data-tool-surface data-tool-id="${escapeHtml(tool.id)}">${tool.module.render({ requestId })}</div>`;
+}
+
+function detailActions(tool) {
+  const reset = typeof tool.module.formId === 'string'
+    ? `<button type="reset" class="iconbtn" form="${escapeHtml(tool.module.formId)}">Reset</button>`
+    : '';
+  return `<button type="button" class="iconbtn" data-pin-toggle data-tool-id="${escapeHtml(tool.id)}" aria-pressed="false" hidden><span class="starmark" aria-hidden="true">&#9734;</span> <span data-pin-label>Pin</span></button>` +
+    '<button type="button" class="iconbtn" data-copy-link hidden>Copy link</button>' + reset +
+    '<span class="visually-hidden" data-pin-status aria-live="polite"></span>';
+}
+
+export function describeMissingPath(requestPath) {
+  const segments = String(requestPath).split('/').filter(Boolean);
+  const isToolPath = segments.length === 2 && segments[0] === 'tools' && /^[A-Za-z0-9_-]{1,64}$/.test(segments[1]);
+  return isToolPath ? { label: '/tools/' + segments[1], toolId: segments[1].toLowerCase() } : { label: null, toolId: null };
+}
+
+function renderNotFound(missing, active) {
+  const suggestion = missing.toolId ? closestToolId(missing.toolId, active) : null;
+  const path = missing.label
+    ? `<p class="mono empty-path">${escapeHtml(missing.label)}</p>`
+    : '<p class="empty-path">That address is not a ToolHub page.</p>';
+  const hint = suggestion
+    ? `<p class="empty-hint">Closest match: <a href="/tools/${escapeHtml(suggestion.id)}">${escapeHtml(suggestion.name)}</a></p>`
+    : '';
+  return '<div class="empty"><p class="empty-mark" aria-hidden="true">&#9888;</p>' +
+    '<h1>Nothing is registered at that path</h1>' +
+    `${path}${hint}` +
+    '<p class="empty-links"><a href="/tools">Browse all tools &rarr;</a><span class="crumb-sep" aria-hidden="true">&middot;</span><a href="/">Back to the workbench</a></p></div>';
 }
 
 export function createApp({ tools = registrations, mode = 'development', logger = console } = {}) {
   const active = validateRegistry(tools);
+  const total = tools.length;
   let manifest;
   try {
     const built = JSON.parse(fs.readFileSync(path.join(root, 'build/client/.vite/manifest.json'), 'utf8'))['src/main.js'];
@@ -59,6 +207,8 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     next();
   });
   const cache = (kind) => mode === 'production' && kind === 'asset' ? 'public, max-age=31536000, immutable' : 'no-cache';
+  const page = (req, res, status, options) => res.status(status).set('Cache-Control', cache('html')).type('html')
+    .send(shell({ requestId: req.id, assets: manifest, tools: active, total, ...options }));
   app.get('/favicon.ico', (req, res) => res.set('Cache-Control', cache('html')).type('image/x-icon').sendFile(path.join(root, 'build/client/favicon.ico')));
   app.use('/assets', (req, res, next) => {
     const rawPath = req.url.split('?')[0];
@@ -73,25 +223,42 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     if (!stat.isFile()) return next();
     res.set('Cache-Control', cache('asset')).sendFile(realPath, (error) => { if (error && !res.headersSent) next(error); });
   });
-  const dashboard = (req, res) => {
-    const result = searchTools(active, req.query.q);
-    const body = `<header class="dashboard-summary"><p class="eyebrow">Workspace overview</p><h1>Find the right tool</h1><p><strong>${active.length}</strong> active ${active.length === 1 ? 'tool' : 'tools'} available.</p><a class="all-tools-link" href="/tools">Browse all tools</a></header>${renderSearchForm(result.raw, req.path)}<section class="tool-discovery" aria-labelledby="tool-results-heading"><h2 id="tool-results-heading">${result.query ? 'Search results' : 'Start exploring'}</h2>${renderToolResults({ tools: result.matches, query: result.query, total: active.length, clearPath: req.path, format: 'summary' })}</section>`;
-    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Dashboard', requestId: req.id, current: 'dashboard', body, assets: manifest, tools: active }));
-  };
-  app.get(['/', '/dashboard'], dashboard);
+  app.get(['/', '/dashboard'], (req, res) => page(req, res, 200, {
+    title: 'Workbench',
+    current: 'dashboard',
+    rawQuery: String(req.query.q ?? ''),
+    topbar: renderTopbar([{ label: 'Workbench' }]),
+    body: renderHome({ active, total })
+  }));
   app.get('/tools', (req, res) => {
-    const result = searchTools(active, req.query.q);
-    const body = `<h1>All Tools</h1><p>Compare every active tool and open its detail page.</p>${renderSearchForm(result.raw, '/tools')}<section class="tool-discovery" aria-labelledby="tool-results-heading"><h2 id="tool-results-heading">${result.query ? 'Search results' : 'Active tools'}</h2>${renderToolResults({ tools: result.matches, query: result.query, total: active.length, clearPath: '/tools', format: 'table' })}</section>`;
-    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Tools', requestId: req.id, current: 'tools', assets: manifest, tools: active, body }));
+    const result = filterTools(active, { q: req.query.q, tag: req.query.tag });
+    page(req, res, 200, {
+      title: 'All tools',
+      current: 'tools',
+      rawQuery: result.rawQuery,
+      topbar: renderTopbar([{ label: 'Workbench', href: '/' }, { label: 'All tools' }]),
+      body: renderTools({ active, result })
+    });
   });
   app.get('/tools/:toolId', (req, res, next) => {
     const id = req.params.toolId.normalize('NFKC');
     if (!toolIdPattern.test(id) || /%|[\\/.]/.test(id)) return next();
-    const tool = active.find((t) => t.id === id); if (!tool) return next();
-    const enhancements = `<section class="tool-enhancements" data-tool-id="${escapeHtml(tool.id)}" aria-label="Tool preferences"><button type="button" data-favorite-toggle aria-pressed="false" hidden>Add to favorites</button><span class="visually-hidden" data-favorite-status aria-live="polite"></span>${tool.module.render({ requestId: req.id })}</section>`;
-    const body = `<nav aria-label="Breadcrumb"><a href="/tools">Tools</a> / ${escapeHtml(tool.name)}</nav><h1>${escapeHtml(tool.name)}</h1><p>${escapeHtml(tool.description)}</p>${enhancements}`;
-    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: tool.name, requestId: req.id, currentTool: tool.id, body, assets: manifest, tools: active }));
+    const tool = active.find((item) => item.id === id); if (!tool) return next();
+    page(req, res, 200, {
+      title: tool.name,
+      currentTool: tool.id,
+      rawQuery: String(req.query.q ?? ''),
+      topbar: renderTopbar([{ label: 'All tools', href: '/tools' }, { label: tool.name }], detailActions(tool)),
+      body: renderDetail(tool, req.id)
+    });
   });
-  app.all(/.*/, (req, res) => res.status(404).set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Not found', requestId: req.id, assets: manifest, tools: active, body: '<h1>Page not found</h1><p>The requested resource is unavailable.</p>' })));
+  app.all(/.*/, (req, res) => {
+    const missing = describeMissingPath(req.path);
+    page(req, res, 404, {
+      title: 'Not found',
+      topbar: renderTopbar([{ label: 'Workbench', href: '/' }, missing.label ? { label: missing.label, mono: true } : { label: 'Not found' }]),
+      body: renderNotFound(missing, active)
+    });
+  });
   return app;
 }
