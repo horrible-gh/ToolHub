@@ -19,26 +19,37 @@ import {
 test('routes, assets, headers and safe errors', async (t) => {
   const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
   const base = 'http://127.0.0.1:' + server.address().port;
+  const expectedCsp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'";
+  const assertSecurityHeaders = (response) => {
+    assert.equal(response.headers.get('content-security-policy'), expectedCsp);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.match(response.headers.get('x-request-id'), /^[A-Za-z0-9_-]{1,80}$/);
+  };
   for (const route of ['/', '/dashboard', '/tools', '/tools/sample-tool', '/tools/random-number']) {
     const r = await fetch(base + route);
     assert.equal(r.status, 200);
-    assert.match(r.headers.get('content-security-policy'), /script-src 'self'; style-src 'self'/);
-    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+    assertSecurityHeaders(r);
   }
   const dashboard = await (await fetch(base + '/')).text();
   const tools = await (await fetch(base + '/tools')).text();
   const random = await (await fetch(base + '/tools/random-number')).text();
+  const sample = await (await fetch(base + '/tools/sample-tool')).text();
   assert.match(dashboard, /Sample Tool/);
   assert.match(dashboard, /Random Number/);
   assert.match(tools, /Random Number/);
-  for (const html of [dashboard, tools, random]) {
+  for (const html of [dashboard, tools, random, sample]) {
     assert.match(html, /<aside class="tool-rail" aria-label="ToolHub navigation">/);
     assert.match(html, /href="\/tools\/sample-tool"/);
     assert.match(html, /href="\/tools\/random-number"/);
+    assert.ok(html.indexOf('<a class="skip" href="#main">') < html.indexOf('<aside class="tool-rail"'));
+    assert.match(html, /<main id="main">/);
+    assert.doesNotMatch(html, /tabindex="[1-9][0-9]*"/i);
   }
   assert.match(dashboard, /href="\/dashboard" aria-current="page"/);
   assert.match(tools, /href="\/tools" aria-current="page">All Tools/);
   assert.match(random, /href="\/tools\/random-number" aria-current="page"/);
+  assert.match(sample, /href="\/tools\/sample-tool" aria-current="page"/);
   assert.match(random, /data-tool-id="random-number"/);
   assert.match(random, /name="minimum"/);
   assert.match(random, /name="maximum"/);
@@ -57,9 +68,17 @@ test('routes, assets, headers and safe errors', async (t) => {
   assert.match(random, /Count cannot exceed the inclusive range size/);
   assert.match(random, />Generate<\/button>/);
   assert.doesNotMatch(random, /onclick=|<script(?![^>]* src=)/i);
-  assert.match(await (await fetch(base + '/tools/sample-tool')).text(), /Read-only example/);
+  assert.match(sample, /Read-only example/);
   for (const route of ['/tools/missing', '/tools/bad--id', '/assets/missing.css', '/assets/%252e%252e/server/app.js']) {
-    const r = await fetch(base + route); assert.equal(r.status, 404); const html = await r.text(); assert.doesNotMatch(html, /server\/app|Error:|node_modules/); assert.match(html, /class="tool-rail"/);
+    const r = await fetch(base + route);
+    assert.equal(r.status, 404);
+    assertSecurityHeaders(r);
+    const html = await r.text();
+    assert.doesNotMatch(html, /server\/app|Error:|node_modules/);
+    assert.match(html, /class="tool-rail"/);
+    assert.match(html, /<a class="skip" href="#main">/);
+    assert.match(html, /<main id="main">/);
+    assert.doesNotMatch(html, /tabindex="[1-9][0-9]*"/i);
   }
   assert.equal((await fetch(base + '/tools/%73ample-tool')).status, 200);
   assert.equal((await fetch(base + '/tools/%2573ample-tool')).status, 404);
@@ -271,6 +290,19 @@ test('random work surface transitions from ready to success and then current err
   }
 });
 
+test('mobile rail and keyboard-safe enhancement contracts stay explicit', async () => {
+  const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const css = await fs.promises.readFile(path.join(sourceRoot, 'client/src/style.css'), 'utf8');
+  const randomSource = await fs.promises.readFile(path.join(sourceRoot, 'client/src/tools/random-number.js'), 'utf8');
+  const favoriteSource = await fs.promises.readFile(path.join(sourceRoot, 'client/src/tools/index.js'), 'utf8');
+  assert.match(css, /@media\(max-width:600px\)\{\.tool-rail\{position:static;width:auto\}/);
+  assert.doesNotMatch(randomSource, /\.focus\s*\(/);
+  assert.doesNotMatch(favoriteSource, /\.focus\s*\(/);
+  assert.match(randomSource, /historyStatus\.textContent\s*=/);
+  assert.match(randomSource, /historyButton\.addEventListener\('click'/);
+  assert.match(favoriteSource, /button\.addEventListener\('click'/);
+});
+
 test('detail enhancements provide closed history and progressively hidden favorite controls', async (t) => {
   const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -278,13 +310,15 @@ test('detail enhancements provide closed history and progressively hidden favori
   const base = 'http://127.0.0.1:' + server.address().port;
   for (const route of ['/tools/random-number', '/tools/sample-tool']) {
     const html = await (await fetch(base + route)).text();
-    assert.match(html, /data-favorite-toggle aria-pressed="false" hidden/);
+    assert.match(html, /<button type="button" data-favorite-toggle aria-pressed="false" hidden/);
     assert.match(html, /data-favorite-status aria-live="polite"/);
   }
   const random = await (await fetch(base + '/tools/random-number')).text();
-  assert.match(random, /data-history-toggle aria-expanded="false" aria-controls="session-run-history" hidden/);
+  assert.match(random, /<button type="button" data-history-toggle aria-expanded="false" aria-controls="session-run-history" hidden/);
   assert.match(random, /id="session-run-history" data-history-panel hidden/);
   assert.match(random, /data-history-empty>No runs in this tab yet/);
+  assert.match(random, /data-history-status aria-live="polite"/);
+  assert.doesNotMatch(random, /aria-live="assertive"/);
   assert.doesNotMatch(random, /onclick=|<script(?![^>]* src=)/i);
 });
 
@@ -306,11 +340,18 @@ test('versioned state adapters recover safely, cap history, and preserve inactiv
     removeItem(key) { memory.delete(key); }
   };
   const historyStore = createStorageAdapter(storage, 'history', validHistoryState);
+  const favoriteStore = createStorageAdapter(storage, 'favorites', validFavoriteState);
   assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
   memory.set('history', '{"version":999,"items":[]}');
   assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
   memory.set('history', '{broken');
+  memory.set('favorites', '{"version":1,"items":[{"toolId":"sample-tool","createdAt":"2026-01-01T00:00:00.000Z"}]}');
   assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
+  assert.deepEqual(favoriteStore.read(emptyFavorites).items.map(({ toolId }) => toolId), ['sample-tool']);
+  memory.set('history', '{"version":1,"items":[]}');
+  memory.set('favorites', '{"version":1,"items":"wrong"}');
+  assert.deepEqual(historyStore.read(emptyHistory), emptyHistory());
+  assert.deepEqual(favoriteStore.read(emptyFavorites), emptyFavorites());
 
   let history = emptyHistory();
   for (let index = 0; index < HISTORY_LIMIT + 2; index += 1) {
@@ -336,9 +377,29 @@ test('versioned state adapters recover safely, cap history, and preserve inactiv
   assert.equal(favorites.items.some(({ toolId }) => toolId === 'inactive-tool'), true);
   favorites = toggleFavorite(favorites, 'random-number', '2026-01-03T00:00:00.000Z');
   assert.deepEqual(favorites.items.map(({ toolId }) => toolId), ['inactive-tool']);
+  assert.equal(favoriteStore.write(favorites), true);
 
-  const unavailable = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }, removeItem() {} };
-  assert.equal(createStorageAdapter(unavailable, 'state', validFavoriteState), null);
+  const blockedSet = { getItem() { return null; }, setItem() { throw new Error('blocked'); }, removeItem() {} };
+  const blockedGet = { getItem() { throw new Error('blocked'); }, setItem() {}, removeItem() {} };
+  assert.equal(createStorageAdapter(blockedSet, 'history', validHistoryState), null);
+  assert.equal(createStorageAdapter(blockedSet, 'favorites', validFavoriteState), null);
+
+  const historyWithBlockedReads = createStorageAdapter(blockedGet, 'history', validHistoryState);
+  const favoritesWithBlockedReads = createStorageAdapter(blockedGet, 'favorites', validFavoriteState);
+  assert.deepEqual(historyWithBlockedReads.read(emptyHistory), emptyHistory());
+  assert.deepEqual(favoritesWithBlockedReads.read(emptyFavorites), emptyFavorites());
+
+  const availableHistoryAlongsideBlockedFavorites = createStorageAdapter(storage, 'history', validHistoryState);
+  const blockedFavoritesAlongsideAvailableHistory = createStorageAdapter(blockedSet, 'favorites', validFavoriteState);
+  assert.notEqual(availableHistoryAlongsideBlockedFavorites, null);
+  assert.equal(blockedFavoritesAlongsideAvailableHistory, null);
+  assert.deepEqual(availableHistoryAlongsideBlockedFavorites.read(emptyHistory), history);
+
+  const blockedHistoryAlongsideAvailableFavorites = createStorageAdapter(blockedSet, 'history', validHistoryState);
+  const availableFavoritesAlongsideBlockedHistory = createStorageAdapter(storage, 'favorites', validFavoriteState);
+  assert.equal(blockedHistoryAlongsideAvailableFavorites, null);
+  assert.notEqual(availableFavoritesAlongsideBlockedHistory, null);
+  assert.deepEqual(availableFavoritesAlongsideBlockedHistory.read(emptyFavorites).items.map(({ toolId }) => toolId), ['inactive-tool']);
 });
 
 test('state rendering sources use safe DOM APIs without innerHTML', async () => {
