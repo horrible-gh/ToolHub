@@ -66,9 +66,68 @@ test('workbench rail only exposes active registry tools', async (t) => {
   const server = createApp({ tools: [...registrations, inactive], logger: { info() {} } }).listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
   const base = 'http://127.0.0.1:' + server.address().port;
   const dashboard = await (await fetch(base + '/')).text();
+  const allTools = await (await fetch(base + '/tools?q=hidden')).text();
   const notFound = await (await fetch(base + '/missing')).text();
   assert.doesNotMatch(dashboard, /Hidden Tool|hidden-tool/);
+  assert.doesNotMatch(allTools, /Hidden Tool|hidden-tool/);
+  assert.match(allTools, /No tools match your search/);
   assert.doesNotMatch(notFound, /Hidden Tool|hidden-tool/);
+});
+
+test('dashboard and all-tools share normalized registry search and render distinct views', async (t) => {
+  const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const home = await (await fetch(base + '/')).text();
+  const dashboard = await (await fetch(base + '/dashboard')).text();
+  const tools = await (await fetch(base + '/tools')).text();
+  assert.match(home, /<strong>2<\/strong> active tools available/);
+  assert.match(home, /href="\/tools">Browse all tools/);
+  assert.match(home, /class="tool-results"/);
+  assert.match(dashboard, /class="tool-results"/);
+  assert.match(tools, /<table class="tool-table">/);
+  for (const heading of ['Name', 'Description', 'Tags', 'ID']) assert.match(tools, new RegExp(`<th scope="col">${heading}<\\/th>`));
+  assert.match(tools, /<code>random-number<\/code>/);
+
+  for (const query of ['random', 'SELECTED RANGE', ' utility ', 'ＲＡＮＤＯＭ']) {
+    for (const route of ['/', '/tools']) {
+      const html = await (await fetch(base + route + '?q=' + encodeURIComponent(query))).text();
+      assert.match(html, /Random Number/);
+      assert.doesNotMatch(html, /<li><a href="\/tools\/sample-tool"|<tr><th scope="row"><a href="\/tools\/sample-tool"/);
+    }
+  }
+});
+
+test('search and registry empty states are distinct and recoverable', async (t) => {
+  const running = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1'); await once(running, 'listening'); t.after(() => running.close());
+  const base = 'http://127.0.0.1:' + running.address().port;
+  for (const route of ['/', '/tools']) {
+    const html = await (await fetch(base + route + '?q=missing')).text();
+    assert.match(html, /role="status"/);
+    assert.match(html, /No tools match your search/);
+    assert.match(html, new RegExp(`href="${route}">Clear search and show all tools`));
+    assert.doesNotMatch(html, /No active tools are registered/);
+  }
+
+  const empty = createApp({ tools: [], logger: { info() {} } }).listen(0, '127.0.0.1'); await once(empty, 'listening'); t.after(() => empty.close());
+  const emptyBase = 'http://127.0.0.1:' + empty.address().port;
+  for (const route of ['/', '/tools?q=anything']) {
+    const html = await (await fetch(emptyBase + route)).text();
+    assert.match(html, /role="status">No active tools are registered/);
+    assert.doesNotMatch(html, /No tools match your search/);
+  }
+});
+
+test('search values and registry display metadata stay escaped', async (t) => {
+  const hostile = { id: 'safe-id', name: '<img src=x onerror=alert(1)>', description: 'Use <script>alert(1)</script>', tags: ['<b>tag</b>'], active: true, module: { render() { return ''; } } };
+  const server = createApp({ tools: [hostile], logger: { info() {} } }).listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  for (const route of ['/?q=%3Cscript%3E', '/tools?q=%3Cscript%3E']) {
+    const html = await (await fetch(base + route)).text();
+    assert.match(html, /value="&lt;script&gt;"/);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.match(html, /&lt;b&gt;tag&lt;\/b&gt;/);
+    assert.doesNotMatch(html, /<img src=x|<script>alert|<b>tag<\/b>/);
+  }
 });
 
 test('random number registry metadata is active', () => {

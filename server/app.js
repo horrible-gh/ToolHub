@@ -8,6 +8,30 @@ import { registrations, validateRegistry, toolIdPattern } from '../tools/registr
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+function searchTools(tools, value) {
+  const raw = String(value ?? '');
+  const query = raw.normalize('NFKC').trim().toLowerCase();
+  const matches = tools.filter((tool) => !query || [tool.name, tool.description, ...tool.tags]
+    .some((field) => String(field).normalize('NFKC').toLowerCase().includes(query)));
+  return { raw, query, matches };
+}
+
+function renderSearchForm(raw, action) {
+  return `<form class="tool-search" role="search" action="${action}"><label for="q">Search by name, description, or tag</label><div><input id="q" name="q" value="${escapeHtml(raw)}"><button>Search</button></div></form>`;
+}
+
+function renderToolResults({ tools, query, total, clearPath, format }) {
+  if (total === 0) return '<p class="empty-state" role="status">No active tools are registered.</p>';
+  if (tools.length === 0) return `<div class="empty-state" role="status"><p>No tools match your search.</p><p><a href="${clearPath}">Clear search and show all tools</a></p></div>`;
+  const tags = (tool) => tool.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join(' ');
+  if (format === 'table') {
+    const rows = tools.map((tool) => `<tr><th scope="row"><a href="/tools/${escapeHtml(tool.id)}">${escapeHtml(tool.name)}</a></th><td>${escapeHtml(tool.description)}</td><td>${tags(tool)}</td><td><code>${escapeHtml(tool.id)}</code></td></tr>`).join('');
+    return `<div class="tool-table-wrap"><table class="tool-table"><caption>${query ? `${tools.length} matching active tools` : `${total} active tools`}</caption><thead><tr><th scope="col">Name</th><th scope="col">Description</th><th scope="col">Tags</th><th scope="col">ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  const items = tools.map((tool) => `<li><a href="/tools/${escapeHtml(tool.id)}">${escapeHtml(tool.name)}</a><span>${escapeHtml(tool.description)}</span><span class="tool-tags">${tags(tool)}</span></li>`).join('');
+  return `<ul class="tool-results" aria-label="${query ? 'Matching tools' : 'Active tools'}">${items}</ul>`;
+}
+
 function shell({ title, requestId, current = '', currentTool = '', body, assets, tools }) {
   const toolLinks = tools.map((tool) => `<a href="/tools/${escapeHtml(tool.id)}"${currentTool === tool.id ? ' aria-current="page"' : ''}>${escapeHtml(tool.name)}</a>`).join('');
   const rail = `<aside class="tool-rail" aria-label="ToolHub navigation"><a class="brand" href="/">ToolHub</a><nav aria-label="Primary"><a href="/dashboard"${current === 'dashboard' ? ' aria-current="page"' : ''}>Dashboard</a><div class="rail-tools"><span class="rail-heading">Tools</span>${toolLinks}</div><a href="/tools"${current === 'tools' ? ' aria-current="page"' : ''}>All Tools</a></nav></aside>`;
@@ -50,14 +74,16 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     res.set('Cache-Control', cache('asset')).sendFile(realPath, (error) => { if (error && !res.headersSent) next(error); });
   });
   const dashboard = (req, res) => {
-    const q = String(req.query.q || '').normalize('NFKC').trim().toLowerCase();
-    const shown = active.filter((t) => !q || [t.name, t.description, ...t.tags].some((v) => v.toLowerCase().includes(q)));
-    const cards = shown.length ? shown.map((t) => `<article class="card"><h2>${escapeHtml(t.name)}</h2><p>${escapeHtml(t.description)}</p><p>${t.tags.map((x) => `<span class="tag">${escapeHtml(x)}</span>`).join(' ')}</p><a href="/tools/${t.id}">Open ${escapeHtml(t.name)}</a></article>`).join('') : '<p role="status">No tools match your search.</p>';
-    const body = `<h1>ToolHub Dashboard</h1><form role="search"><label for="q">Search tools</label><input id="q" name="q" value="${escapeHtml(req.query.q || '')}"><button>Search</button></form><section class="grid" aria-label="Available tools">${cards}</section>`;
+    const result = searchTools(active, req.query.q);
+    const body = `<header class="dashboard-summary"><p class="eyebrow">Workspace overview</p><h1>Find the right tool</h1><p><strong>${active.length}</strong> active ${active.length === 1 ? 'tool' : 'tools'} available.</p><a class="all-tools-link" href="/tools">Browse all tools</a></header>${renderSearchForm(result.raw, req.path)}<section class="tool-discovery" aria-labelledby="tool-results-heading"><h2 id="tool-results-heading">${result.query ? 'Search results' : 'Start exploring'}</h2>${renderToolResults({ tools: result.matches, query: result.query, total: active.length, clearPath: req.path, format: 'summary' })}</section>`;
     res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Dashboard', requestId: req.id, current: 'dashboard', body, assets: manifest, tools: active }));
   };
   app.get(['/', '/dashboard'], dashboard);
-  app.get('/tools', (req, res) => res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Tools', requestId: req.id, current: 'tools', assets: manifest, tools: active, body: `<h1>All Tools</h1><div class="grid">${active.map((t) => `<article class="card"><h2>${escapeHtml(t.name)}</h2><p>${escapeHtml(t.description)}</p><a href="/tools/${t.id}">Open</a></article>`).join('')}</div>` })));
+  app.get('/tools', (req, res) => {
+    const result = searchTools(active, req.query.q);
+    const body = `<h1>All Tools</h1><p>Compare every active tool and open its detail page.</p>${renderSearchForm(result.raw, '/tools')}<section class="tool-discovery" aria-labelledby="tool-results-heading"><h2 id="tool-results-heading">${result.query ? 'Search results' : 'Active tools'}</h2>${renderToolResults({ tools: result.matches, query: result.query, total: active.length, clearPath: '/tools', format: 'table' })}</section>`;
+    res.set('Cache-Control', cache('html')).type('html').send(shell({ title: 'Tools', requestId: req.id, current: 'tools', assets: manifest, tools: active, body }));
+  });
   app.get('/tools/:toolId', (req, res, next) => {
     const id = req.params.toolId.normalize('NFKC');
     if (!toolIdPattern.test(id) || /%|[\\/.]/.test(id)) return next();
