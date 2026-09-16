@@ -7,7 +7,7 @@ import { EventEmitter, once } from 'node:events';
 import { spawn, spawnSync } from 'node:child_process';
 import { createApp } from '../server/app.js';
 import { loadConfig } from '../server/config.js';
-import { inspectOoxml, libreOfficeConverter, makeZip } from '../server/pdf-maker.js';
+import { inspectOoxml, libreOfficeConverter, makeZip, officeConverter } from '../server/pdf-maker.js';
 
 const pdf = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF');
 const xml = (body) => Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${body}`, 'utf8');
@@ -152,6 +152,9 @@ test('PDF-Maker validates OOXML, PDF-Maker environment bounds and storage isolat
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_CONCURRENCY: '0' }), { code: 'INVALID_ENV' });
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: process.cwd() }), { code: 'INVALID_ENV' });
   const valid = loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-test') }); assert.deepEqual(valid.pdfMaker.allowedExtensions, ['.docx', '.pptx']);
+  assert.equal(valid.pdfMaker.engine, process.platform === 'win32' ? 'office' : 'libreoffice');
+  assert.equal(loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-office-test'), PDF_MAKER_ENGINE: 'office' }).pdfMaker.engine, 'office');
+  assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-engine-test'), PDF_MAKER_ENGINE: 'invalid' }), { code: 'INVALID_ENV' });
 });
 
 test('PDF-Maker maps converter timeout without exposing process details', async (t) => {
@@ -222,6 +225,34 @@ test('PDF-Maker rejects a staging link redirected outside the trusted job root',
   const response = await submit(base, [['linked.docx', ooxml()]]); const accepted = await response.json(); const status = await finished(base, accepted);
   assert.equal(status.status, 'failed'); assert.equal(status.files[0].error.code, 'INVALID_PDF');
   assert.deepEqual(await fs.readFile(path.join(outside, 'escaped.pdf')), pdf);
+});
+
+test('Office converter invokes hidden PowerShell COM automation with Unicode-safe paths', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'toolhub-pdf-office-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const inputPath = path.join(root, '職務経歴書.docx'); const outputDir = path.join(root, 'out');
+  await fs.writeFile(inputPath, realDocx());
+  let invocation;
+  const result = await officeConverter({
+    inputPath, outputDir, timeoutMs: 1000, executable: 'powershell.exe',
+    spawnImpl(executable, args, options) {
+      invocation = { executable, args, options };
+      const child = new EventEmitter(); child.pid = 12345; queueMicrotask(() => child.emit('exit', 0)); return child;
+    }
+  });
+  assert.equal(invocation.executable, 'powershell.exe');
+  assert.deepEqual(invocation.args.slice(0, 3), ['-NoLogo', '-NoProfile', '-NonInteractive']);
+  assert.equal(invocation.options.windowsHide, true);
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.env.PDF_MAKER_INPUT, path.resolve(inputPath));
+  assert.equal(invocation.options.env.PDF_MAKER_OUTPUT, path.resolve(result));
+  const script = Buffer.from(invocation.args.at(-1), 'base64').toString('utf16le');
+  assert.match(script, /Word\.Application/);
+  assert.match(script, /PowerPoint\.Application/);
+  assert.equal(script.match(/\$app\.AutomationSecurity = 3/g)?.length, 2);
+  assert.match(script, /ExportAsFixedFormat/);
+  assert.match(script, /\$missing = \[Type\]::Missing/);
+  assert.match(script, /Documents\.Open\([^\r\n]+\$false, \$true, \$missing, \$true\)/);
 });
 
 test('LibreOffice timeout kills a real process tree and reports no staged output', async (t) => {

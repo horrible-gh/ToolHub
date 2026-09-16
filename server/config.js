@@ -30,7 +30,9 @@ export function loadConfig(env = process.env) {
       retentionMs: integer(env, 'PDF_MAKER_RETENTION_MS', 60 * 60 * 1000, 1000, 7 * 24 * 60 * 60 * 1000),
       cleanupIntervalMs: integer(env, 'PDF_MAKER_CLEANUP_INTERVAL_MS', 60000, 1000, 24 * 60 * 60 * 1000),
       storageRoot,
-      libreOfficePath: env.PDF_MAKER_LIBREOFFICE_PATH || 'libreoffice'
+      engine: (() => { const value = env.PDF_MAKER_ENGINE || (process.platform === 'win32' ? 'office' : 'libreoffice'); if (!['office', 'libreoffice'].includes(value)) throw Object.assign(new Error('PDF_MAKER_ENGINE must be office or libreoffice'), { code: 'INVALID_ENV' }); return value; })(),
+      libreOfficePath: env.PDF_MAKER_LIBREOFFICE_PATH || 'libreoffice',
+      powershellPath: env.PDF_MAKER_POWERSHELL_PATH || 'powershell.exe'
     }
   };
 }

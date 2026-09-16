@@ -183,11 +183,9 @@ async function terminateProcessTree(child) {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
   }
 }
-export async function libreOfficeConverter({ inputPath, outputDir, profileDir, timeoutMs, executable = 'libreoffice', spawnImpl = spawn, killImpl }) {
-  await fsp.mkdir(outputDir, { recursive: true }); await fsp.mkdir(profileDir, { recursive: true });
-  const args = ['--headless', '--nologo', '--nodefault', '--nolockcheck', '--nofirststartwizard', `-env:UserInstallation=${new URL(`file://${path.resolve(profileDir).replace(/\\/g, '/')}`).href}`, '--convert-to', 'pdf', '--outdir', outputDir, inputPath];
+async function runConverterProcess({ executable, args, outputDir, timeoutMs, spawnImpl = spawn, killImpl, env }) {
   await new Promise((resolve, reject) => {
-    const child = spawnImpl(executable, args, { cwd: outputDir, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore' });
+    const child = spawnImpl(executable, args, { cwd: outputDir, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore', env });
     let settled = false; let timingOut = false;
     const finish = (callback) => { if (settled) return; settled = true; clearTimeout(timer); callback(); };
     const timer = setTimeout(() => {
@@ -200,11 +198,54 @@ export async function libreOfficeConverter({ inputPath, outputDir, profileDir, t
     child.once('error', (error) => { if (!timingOut) finish(() => reject(Object.assign(error, { code: 'CONVERTER_FAILED' }))); });
     child.once('exit', (code) => { if (!timingOut) finish(() => code !== 0 ? reject(Object.assign(new Error('converter exited unsuccessfully'), { code: 'CONVERTER_FAILED' })) : resolve()); });
   });
+}
+export async function libreOfficeConverter({ inputPath, outputDir, profileDir, timeoutMs, executable = 'libreoffice', spawnImpl = spawn, killImpl }) {
+  await fsp.mkdir(outputDir, { recursive: true }); await fsp.mkdir(profileDir, { recursive: true });
+  const args = ['--headless', '--nologo', '--nodefault', '--nolockcheck', '--nofirststartwizard', `-env:UserInstallation=${new URL(`file://${path.resolve(profileDir).replace(/\\/g, '/')}`).href}`, '--convert-to', 'pdf', '--outdir', outputDir, inputPath];
+  await runConverterProcess({ executable, args, outputDir, timeoutMs, spawnImpl, killImpl });
   return path.join(outputDir, `${path.basename(inputPath, path.extname(inputPath))}.pdf`);
 }
+const officeScript = `
+$ErrorActionPreference = 'Stop'
+$inputPath = $env:PDF_MAKER_INPUT
+$outputPath = $env:PDF_MAKER_OUTPUT
+$extension = [IO.Path]::GetExtension($inputPath).ToLowerInvariant()
+$app = $item = $null
+try {
+  if ($extension -eq '.docx') {
+    $app = New-Object -ComObject Word.Application
+    $app.Visible = $false
+    $app.DisplayAlerts = 0
+    $app.AutomationSecurity = 3
+    $missing = [Type]::Missing
+    $item = $app.Documents.Open($inputPath, $false, $true, $false, '__pdf_maker_nopass__', '__pdf_maker_nopass__', $false, '__pdf_maker_nopass__', '__pdf_maker_nopass__', $missing, $missing, $false, $true, $missing, $true)
+    $item.ExportAsFixedFormat($outputPath, 17)
+  } elseif ($extension -eq '.pptx') {
+    $app = New-Object -ComObject PowerPoint.Application
+    try { $app.DisplayAlerts = 1 } catch {}
+    $app.AutomationSecurity = 3
+    $item = $app.Presentations.Open($inputPath, -1, 0, 0)
+    try { $item.ExportAsFixedFormat($outputPath, 2) } catch { $item.SaveAs($outputPath, 32) }
+  } else { throw 'unsupported Office extension' }
+} finally {
+  if ($null -ne $item) { try { $item.Close() } catch {}; [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) }
+  if ($null -ne $app) { try { $app.Quit() } catch {}; [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app) }
+  [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+`;
+export async function officeConverter({ inputPath, outputDir, timeoutMs, executable = 'powershell.exe', spawnImpl = spawn, killImpl }) {
+  await fsp.mkdir(outputDir, { recursive: true });
+  const outputPath = path.join(outputDir, `${path.basename(inputPath, path.extname(inputPath))}.pdf`);
+  const encoded = Buffer.from(officeScript, 'utf16le').toString('base64');
+  const env = { ...process.env, PDF_MAKER_INPUT: path.resolve(inputPath), PDF_MAKER_OUTPUT: path.resolve(outputPath) };
+  await runConverterProcess({ executable, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], outputDir, timeoutMs, spawnImpl, killImpl, env });
+  return outputPath;
+}
 
-export function createPdfMaker({ config, converter = libreOfficeConverter, logger = console, now = () => Date.now(), startCleanup = true, removePath = fsp.rm } = {}) {
+export function createPdfMaker({ config, converter, logger = console, now = () => Date.now(), startCleanup = true, removePath = fsp.rm } = {}) {
   if (!config) throw new TypeError('pdf-maker config is required');
+  const engine = config.engine || (process.platform === 'win32' ? 'office' : 'libreoffice');
+  const selectedConverter = converter || (engine === 'office' ? officeConverter : libreOfficeConverter);
   const jobs = new Map(); const queue = []; let running = 0; let closed = false;
   fs.mkdirSync(config.storageRoot, { recursive: true, mode: 0o700 });
   const log = (level, value) => logger[level]?.(JSON.stringify(value));
@@ -227,7 +268,7 @@ export function createPdfMaker({ config, converter = libreOfficeConverter, logge
     try {
       await Promise.all([fsp.mkdir(workDir, { recursive: true }), fsp.mkdir(stagedDir, { recursive: true })]);
       const trustedRoot = await fsp.realpath(job.root);
-      const candidate = await converter({ inputPath: file.inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: config.libreOfficePath, jobId: job.id, fileId: file.id });
+      const candidate = await selectedConverter({ inputPath: file.inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: engine === 'office' ? config.powershellPath : config.libreOfficePath, jobId: job.id, fileId: file.id });
       if (job.cleaned) return;
       const realRoot = await fsp.realpath(job.root); const realStaged = await fsp.realpath(stagedDir); const realCandidate = await fsp.realpath(candidate);
       const within = (parent, child) => child === parent || child.startsWith(parent + path.sep);
@@ -240,7 +281,7 @@ export function createPdfMaker({ config, converter = libreOfficeConverter, logge
       const pdf = await fsp.readFile(realCandidate); if (!validPdf(pdf)) throw Object.assign(new Error('invalid pdf'), { code: 'INVALID_PDF' });
       const destination = path.join(realResults, `${file.id}.pdf`); await fsp.rename(realCandidate, destination); file.resultPath = destination; file.resultSize = pdf.length; transition(file, 'succeeded', logger, job);
     } catch (error) { if (!job.cleaned) { file.error = publicFailure(error.code === 'CONVERSION_TIMEOUT' ? 'CONVERSION_TIMEOUT' : error.code === 'INVALID_PDF' ? 'INVALID_PDF' : 'CONVERTER_FAILED'); transition(file, 'failed', logger, job); } }
-    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), fsp.rm(stagedDir, { recursive: true, force: true }), fsp.rm(profileDir, { recursive: true, force: true })]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine: 'libreoffice' }); }
+    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), fsp.rm(stagedDir, { recursive: true, force: true }), fsp.rm(profileDir, { recursive: true, force: true })]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine }); }
   };
   const summary = (job) => {
     const counts = job.files.reduce((a, f) => { a[f.status] = (a[f.status] || 0) + 1; return a; }, {});
