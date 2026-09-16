@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter, once } from 'node:events';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createApp } from '../server/app.js';
-import { loadConfig } from '../server/config.js';
+import { defaultLibreOfficePath, loadConfig } from '../server/config.js';
 import { inspectOoxml, libreOfficeConverter, makeZip, officeConverter } from '../server/pdf-maker.js';
 
 const pdf = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF');
@@ -41,12 +42,9 @@ const realPptx = () => makeZip([
 ]);
 const ooxml = (kind = 'docx') => (kind === 'docx' ? realDocx() : realPptx());
 function findLibreOfficeExecutable() {
-  const candidates = [process.env.PDF_MAKER_LIBREOFFICE_PATH, 'soffice', 'libreoffice', 'soffice.exe'].filter(Boolean);
-  for (const candidate of candidates) {
-    let probe; try { probe = spawnSync(candidate, ['--version'], { windowsHide: true, timeout: 5000 }); } catch { continue; }
-    if (probe && !probe.error && probe.status === 0) return candidate;
-  }
-  return null;
+  const candidate = defaultLibreOfficePath();
+  if (path.isAbsolute(candidate)) return fsSync.existsSync(candidate) ? candidate : null;
+  return process.platform === 'win32' ? null : candidate;
 }
 const encryptedOfficeContainer = () => {
   const header = Buffer.alloc(512, 0); const directory = Buffer.alloc(512, 0); const fat = Buffer.alloc(512, 0xff);
@@ -84,7 +82,7 @@ const encryptedOfficeDifatContainer = () => {
 const configFor = (root, overrides = {}) => ({
   allowedExtensions: ['.docx', '.pptx'], fileMaxBytes: 1024 * 1024, requestMaxBytes: 2 * 1024 * 1024,
   maxFiles: 4, timeoutMs: 1000, concurrency: 2, queueLimit: 8, retentionMs: 60000,
-  cleanupIntervalMs: 60000, storageRoot: root, libreOfficePath: 'unused', ...overrides
+  cleanupIntervalMs: 60000, storageRoot: root, runtimeRoot: path.join(os.tmpdir(), 'th-pdf-rt'), libreOfficePath: 'unused', ...overrides
 });
 async function harness(t, { converter, config = {}, logger = { info() {}, warn() {} }, removePath } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'toolhub-pdf-maker-test-'));
@@ -98,8 +96,8 @@ async function submit(base, files) {
   for (const [name, data] of files) form.append('files', new Blob([data]), name);
   return fetch(`${base}/api/pdf-maker/jobs`, { method: 'POST', body: form });
 }
-async function finished(base, accepted) {
-  for (let count = 0; count < 100; count += 1) {
+async function finished(base, accepted, attempts = 100) {
+  for (let count = 0; count < attempts; count += 1) {
     const response = await fetch(`${base}/api/pdf-maker/jobs/${accepted.jobId}`, { headers: { Authorization: `Bearer ${accepted.accessToken}` } });
     const status = await response.json(); if (['succeeded', 'partial', 'failed'].includes(status.status)) return status;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -152,9 +150,33 @@ test('PDF-Maker validates OOXML, PDF-Maker environment bounds and storage isolat
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_CONCURRENCY: '0' }), { code: 'INVALID_ENV' });
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: process.cwd() }), { code: 'INVALID_ENV' });
   const valid = loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-test') }); assert.deepEqual(valid.pdfMaker.allowedExtensions, ['.docx', '.pptx']);
-  assert.equal(valid.pdfMaker.engine, process.platform === 'win32' ? 'office' : 'libreoffice');
+  assert.equal(valid.pdfMaker.engine, 'libreoffice');
+  if (process.platform === 'win32') {
+    assert.match(valid.pdfMaker.libreOfficePath, /soffice\.com$/i);
+    assert.doesNotMatch(valid.pdfMaker.libreOfficePath, /soffice\.exe$/i);
+  }
   assert.equal(loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-office-test'), PDF_MAKER_ENGINE: 'office' }).pdfMaker.engine, 'office');
+  assert.equal(defaultLibreOfficePath({ PDF_MAKER_LIBREOFFICE_PATH: 'D:\\LibreOffice\\soffice.com' }, 'win32'), 'D:\\LibreOffice\\soffice.com');
+  assert.equal(defaultLibreOfficePath({}, 'win32'), 'soffice.com');
+  assert.equal(defaultLibreOfficePath({}, 'linux'), 'libreoffice');
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-engine-test'), PDF_MAKER_ENGINE: 'invalid' }), { code: 'INVALID_ENV' });
+});
+
+test('PDF-Maker keeps every LibreOffice argument path independent of storageRoot length', async (t) => {
+  let invoked;
+  const runtimeRoot = path.join(os.tmpdir(), 'th-pdf-rt-paths');
+  const { base, root } = await harness(t, { config: { runtimeRoot }, converter: async ({ inputPath, outputDir, profileDir }) => {
+    invoked = { inputPath, outputDir, profileDir };
+    const result = path.join(outputDir, 'result.pdf'); await fs.mkdir(outputDir, { recursive: true }); await fs.writeFile(result, pdf); return result;
+  } });
+  const response = await submit(base, [['profile.docx', ooxml()]]);
+  const accepted = await response.json(); const status = await finished(base, accepted);
+  assert.equal(status.status, 'succeeded');
+  for (const argumentPath of Object.values(invoked)) {
+    assert.equal(argumentPath.startsWith(runtimeRoot + path.sep), true);
+    assert.equal(argumentPath.startsWith(root + path.sep), false);
+  }
+  await assert.rejects(fs.stat(path.dirname(invoked.inputPath)));
 });
 
 test('PDF-Maker maps converter timeout without exposing process details', async (t) => {
@@ -288,7 +310,7 @@ test('LibreOffice timeout completes finitely even when termination does not sett
 test('LibreOffice headless conversion accepts the representative Word and PowerPoint fixtures when LibreOffice is installed', async (t) => {
   const executable = findLibreOfficeExecutable();
   if (!executable) {
-    t.skip(`no LibreOffice headless binary found (checked $PDF_MAKER_LIBREOFFICE_PATH, "soffice", "libreoffice", "soffice.exe"); conditional real-conversion check skipped on this host`);
+    t.skip(`no LibreOffice headless binary found at the configured runtime path: ${defaultLibreOfficePath()}`);
     return;
   }
   for (const [name, data] of [['report.docx', realDocx()], ['slides.pptx', realPptx()]]) {
@@ -300,6 +322,26 @@ test('LibreOffice headless conversion accepts the representative Word and PowerP
     const produced = await fs.readFile(resultPath);
     assert.equal(produced.subarray(0, 5).toString(), '%PDF-');
     assert.ok(produced.includes(Buffer.from('%%EOF')));
+  }
+});
+
+test('LibreOffice API conversion succeeds repeatedly with a deployment-length storageRoot', async (t) => {
+  const executable = findLibreOfficeExecutable();
+  if (!executable) { t.skip('LibreOffice is not installed'); return; }
+  const longRoot = path.join(os.tmpdir(), `flowgate-storage-${'x'.repeat(150)}`);
+  const runtimeRoot = loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: longRoot }).pdfMaker.runtimeRoot;
+  const app = createApp({ logger: { info() {}, warn() {} }, pdfMakerConfig: configFor(longRoot, { runtimeRoot, libreOfficePath: executable, timeoutMs: 60000 }) });
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { server.close(); await app.locals.pdfMaker.close(); await fs.rm(longRoot, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await submit(base, [[`long-${attempt}.docx`, realDocx()]]);
+    assert.equal(response.status, 202);
+    const accepted = await response.json(); const status = await finished(base, accepted, 1000);
+    assert.equal(status.status, 'succeeded');
+    const download = await fetch(`${base}/api/pdf-maker/jobs/${status.jobId}/files/${status.files[0].id}`, { headers: { Authorization: `Bearer ${accepted.accessToken}` } });
+    const produced = Buffer.from(await download.arrayBuffer());
+    assert.equal(download.status, 200); assert.equal(produced.subarray(0, 5).toString(), '%PDF-'); assert.ok(produced.includes(Buffer.from('%%EOF')));
   }
 });
 

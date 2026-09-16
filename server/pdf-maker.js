@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import express from 'express';
@@ -244,10 +245,12 @@ export async function officeConverter({ inputPath, outputDir, timeoutMs, executa
 
 export function createPdfMaker({ config, converter, logger = console, now = () => Date.now(), startCleanup = true, removePath = fsp.rm } = {}) {
   if (!config) throw new TypeError('pdf-maker config is required');
-  const engine = config.engine || (process.platform === 'win32' ? 'office' : 'libreoffice');
+  const engine = config.engine || 'libreoffice';
   const selectedConverter = converter || (engine === 'office' ? officeConverter : libreOfficeConverter);
   const jobs = new Map(); const queue = []; let running = 0; let closed = false;
   fs.mkdirSync(config.storageRoot, { recursive: true, mode: 0o700 });
+  const runtimeRoot = path.resolve(config.runtimeRoot || path.join(os.tmpdir(), 'toolhub-pdf-maker-runtime'));
+  fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
   const log = (level, value) => logger[level]?.(JSON.stringify(value));
   const removeJob = async (job, reason = 'explicit') => {
     if (job.cleaned) return false; job.cleaned = true;
@@ -264,24 +267,27 @@ export function createPdfMaker({ config, converter, logger = console, now = () =
   const enqueue = (task) => { if (queue.length + running >= config.queueLimit) return false; queue.push(task); pump(); return true; };
   const runFile = async (job, file) => {
     if (job.cleaned) return; transition(file, 'converting', logger, job); const began = now();
-    const workDir = path.join(job.root, 'work', file.id); const stagedDir = path.join(job.root, 'staged', file.id); const profileDir = path.join(job.root, 'profiles', file.id);
+    const workDir = path.join(job.root, 'work', file.id); let runtimeDir;
     try {
-      await Promise.all([fsp.mkdir(workDir, { recursive: true }), fsp.mkdir(stagedDir, { recursive: true })]);
-      const trustedRoot = await fsp.realpath(job.root);
-      const candidate = await selectedConverter({ inputPath: file.inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: engine === 'office' ? config.powershellPath : config.libreOfficePath, jobId: job.id, fileId: file.id });
+      await fsp.mkdir(workDir, { recursive: true });
+      runtimeDir = await fsp.mkdtemp(path.join(runtimeRoot, 'c-'));
+      const inputPath = path.join(runtimeDir, `i${path.extname(file.inputPath)}`);
+      const stagedDir = path.join(runtimeDir, 'o'); const profileDir = path.join(runtimeDir, 'p');
+      await Promise.all([fsp.copyFile(file.inputPath, inputPath), fsp.mkdir(stagedDir), fsp.mkdir(profileDir)]);
+      const candidate = await selectedConverter({ inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: engine === 'office' ? config.powershellPath : config.libreOfficePath, jobId: job.id, fileId: file.id });
       if (job.cleaned) return;
-      const realRoot = await fsp.realpath(job.root); const realStaged = await fsp.realpath(stagedDir); const realCandidate = await fsp.realpath(candidate);
+      const realRuntime = await fsp.realpath(runtimeDir); const realStaged = await fsp.realpath(stagedDir); const realCandidate = await fsp.realpath(candidate);
       const within = (parent, child) => child === parent || child.startsWith(parent + path.sep);
-      const [stagedInfo, candidateInfo] = await Promise.all([fsp.lstat(stagedDir), fsp.lstat(candidate)]);
-      if (realRoot !== trustedRoot || !within(trustedRoot, realStaged) || stagedInfo.isSymbolicLink() || candidateInfo.isSymbolicLink() || !within(realStaged, realCandidate)) {
-        throw Object.assign(new Error('converter output escaped job root'), { code: 'INVALID_PDF' });
+      const [runtimeInfo, stagedInfo, candidateInfo] = await Promise.all([fsp.lstat(runtimeDir), fsp.lstat(stagedDir), fsp.lstat(candidate)]);
+      if (runtimeInfo.isSymbolicLink() || !within(realRuntime, realStaged) || stagedInfo.isSymbolicLink() || candidateInfo.isSymbolicLink() || !within(realStaged, realCandidate)) {
+        throw Object.assign(new Error('converter output escaped runtime root'), { code: 'INVALID_PDF' });
       }
-      const realResults = await fsp.realpath(path.join(job.root, 'results'));
+      const realRoot = await fsp.realpath(job.root); const realResults = await fsp.realpath(path.join(job.root, 'results'));
       if (!within(realRoot, realResults)) throw Object.assign(new Error('result directory escaped job root'), { code: 'INVALID_PDF' });
       const pdf = await fsp.readFile(realCandidate); if (!validPdf(pdf)) throw Object.assign(new Error('invalid pdf'), { code: 'INVALID_PDF' });
-      const destination = path.join(realResults, `${file.id}.pdf`); await fsp.rename(realCandidate, destination); file.resultPath = destination; file.resultSize = pdf.length; transition(file, 'succeeded', logger, job);
+      const destination = path.join(realResults, `${file.id}.pdf`); await fsp.writeFile(destination, pdf, { flag: 'wx' }); file.resultPath = destination; file.resultSize = pdf.length; transition(file, 'succeeded', logger, job);
     } catch (error) { if (!job.cleaned) { file.error = publicFailure(error.code === 'CONVERSION_TIMEOUT' ? 'CONVERSION_TIMEOUT' : error.code === 'INVALID_PDF' ? 'INVALID_PDF' : 'CONVERTER_FAILED'); transition(file, 'failed', logger, job); } }
-    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), fsp.rm(stagedDir, { recursive: true, force: true }), fsp.rm(profileDir, { recursive: true, force: true })]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine }); }
+    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), runtimeDir ? fsp.rm(runtimeDir, { recursive: true, force: true }) : Promise.resolve()]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine }); }
   };
   const summary = (job) => {
     const counts = job.files.reduce((a, f) => { a[f.status] = (a[f.status] || 0) + 1; return a; }, {});

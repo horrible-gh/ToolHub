@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,16 @@ const integer = (env, name, fallback, minimum, maximum) => {
   return Number(raw);
 };
 const inside = (candidate, parent) => candidate === parent || candidate.startsWith(parent + path.sep);
+export function defaultLibreOfficePath(env = process.env, platform = process.platform) {
+  if (env.PDF_MAKER_LIBREOFFICE_PATH) return env.PDF_MAKER_LIBREOFFICE_PATH;
+  if (platform !== 'win32') return 'libreoffice';
+  const roots = [env.ProgramFiles, env['ProgramFiles(x86)']].filter(Boolean);
+  for (const root of roots) {
+    const candidate = path.join(root, 'LibreOffice', 'program', 'soffice.com');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'soffice.com';
+}
 
 export function loadConfig(env = process.env) {
   const port = integer(env, 'PORT', 6412, 1, 65535);
@@ -30,8 +41,9 @@ export function loadConfig(env = process.env) {
       retentionMs: integer(env, 'PDF_MAKER_RETENTION_MS', 60 * 60 * 1000, 1000, 7 * 24 * 60 * 60 * 1000),
       cleanupIntervalMs: integer(env, 'PDF_MAKER_CLEANUP_INTERVAL_MS', 60000, 1000, 24 * 60 * 60 * 1000),
       storageRoot,
-      engine: (() => { const value = env.PDF_MAKER_ENGINE || (process.platform === 'win32' ? 'office' : 'libreoffice'); if (!['office', 'libreoffice'].includes(value)) throw Object.assign(new Error('PDF_MAKER_ENGINE must be office or libreoffice'), { code: 'INVALID_ENV' }); return value; })(),
-      libreOfficePath: env.PDF_MAKER_LIBREOFFICE_PATH || 'libreoffice',
+      runtimeRoot: path.resolve(env.PDF_MAKER_RUNTIME_ROOT || (process.platform === 'win32' ? path.join(env.SystemRoot || 'C:\\Windows', 'Temp', 'toolhub-pdf-maker-runtime') : path.join(os.tmpdir(), 'toolhub-pdf-maker-runtime'))),
+      engine: (() => { const value = env.PDF_MAKER_ENGINE || 'libreoffice'; if (!['office', 'libreoffice'].includes(value)) throw Object.assign(new Error('PDF_MAKER_ENGINE must be office or libreoffice'), { code: 'INVALID_ENV' }); return value; })(),
+      libreOfficePath: defaultLibreOfficePath(env),
       powershellPath: env.PDF_MAKER_POWERSHELL_PATH || 'powershell.exe'
     }
   };
