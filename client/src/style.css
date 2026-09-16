@@ -144,6 +144,33 @@ select{font:inherit;font-size:.82rem;padding:.25rem .45rem;border:1px solid var(
 .drow .bad{color:var(--red)}
 .drow-empty{margin:0;padding:.7rem 1.4rem;color:var(--dim);font-size:.8rem}
 
+
+/* PDF-Maker */
+.pdf-maker{max-width:70rem}
+.pdf-drop{background:var(--surface);border:2px dashed #b8c5da;border-radius:12px;padding:2.2rem 1rem;text-align:center;transition:border-color .15s,background .15s}
+.pdf-drop.is-dragging{border-color:var(--blue);background:#edf4ff}
+.pdf-drop h2{margin:.5rem 0 .25rem;font-size:1.15rem}
+.pdf-drop p{margin:.2rem 0;color:var(--dim)}
+.pdf-drop-icon{margin:auto;width:48px;height:48px;display:grid;place-items:center;border-radius:10px;background:#e8eef9;color:var(--blue);font:700 .8rem var(--mono)}
+.pdf-choose{display:inline-block;margin:.8rem 0 .3rem;background:var(--blue);color:#fff;border-radius:6px;padding:.48rem .9rem;font-weight:700;cursor:pointer}
+.pdf-choose:hover{background:var(--blue2)}
+.pdf-choose:focus-within{outline:3px solid var(--amber)}
+.pdf-drop-help,.pdf-privacy{font-size:.78rem;color:var(--dimmer)}
+.pdf-privacy{margin:.6rem 0 1rem}
+.pdf-work{background:var(--surface);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.pdf-toolbar{display:flex;align-items:center;gap:1rem;padding:.8rem .9rem;border-bottom:1px solid var(--line)}
+.pdf-toolbar h2,.pdf-toolbar p{margin:0}.pdf-toolbar h2{font-size:.9rem}.pdf-toolbar p{font-size:.78rem;color:var(--dim)}
+.pdf-actions{margin-left:auto;display:flex;gap:.45rem;align-items:center}
+.pdf-convert,.pdf-zip{width:auto;padding:.45rem .85rem}
+.cta:disabled,.ghost:disabled{opacity:.5;cursor:not-allowed}
+.pdf-table-wrap{overflow-x:auto}
+.pdf-table{min-width:650px}
+.pdf-table .pdf-name{max-width:25rem;overflow-wrap:anywhere}
+.pdf-row-actions{text-align:right;white-space:nowrap}
+.pdf-status{font-weight:650}.pdf-status-succeeded{color:#157347}.pdf-status-failed{color:var(--red)}.pdf-status-converting,.pdf-status-queued{color:var(--blue)}
+.pdf-results{display:flex;align-items:center;gap:.6rem;padding:.75rem .9rem;border-top:1px solid var(--line);background:#f7f9fd;flex-wrap:wrap}
+.pdf-results p{margin:0;margin-right:auto}
+
 /* not found */
 .empty{background:var(--surface);border:1px dashed var(--line);border-radius:9px;padding:2.4rem 1.2rem;text-align:center;color:var(--dim);max-width:44rem;margin:0 auto}
 .empty h1{margin:.2rem 0 .5rem;font-size:1.15rem;color:var(--ink)}
@@ -166,4 +193,11 @@ select{font:inherit;font-size:.82rem;padding:.25rem .45rem;border:1px solid var(
   .drow{grid-template-columns:minmax(0,1fr);gap:.2rem}
   .topbar{padding:.6rem 1rem}
   .statrow{grid-template-columns:1fr}
+  .pdf-toolbar{align-items:stretch;flex-direction:column}
+  .pdf-actions{margin-left:0;display:grid;grid-template-columns:1fr}
+  .pdf-convert{width:100%}
+  .pdf-results{align-items:stretch;flex-direction:column}
+  .pdf-results p{margin-right:0}
+  .pdf-zip,.pdf-results .ghost{width:100%}
 }
+
