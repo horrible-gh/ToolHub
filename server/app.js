@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from './config.js';
+import { createPdfMaker } from './pdf-maker.js';
 import { registrations, validateRegistry, toolIdPattern, groupTools, tagCounts, toolIcon, closestToolId } from '../tools/registry.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -185,7 +187,7 @@ function renderNotFound(missing, active) {
     '<p class="empty-links"><a href="/tools">Browse all tools &rarr;</a><span class="crumb-sep" aria-hidden="true">&middot;</span><a href="/">Back to the workbench</a></p></div>';
 }
 
-export function createApp({ tools = registrations, mode = 'development', logger = console } = {}) {
+export function createApp({ tools = registrations, mode = 'development', logger = console, pdfMakerConfig = loadConfig().pdfMaker, pdfMakerConverter, pdfMakerStartCleanup = false, pdfMakerRemovePath } = {}) {
   const active = validateRegistry(tools);
   const total = tools.length;
   let manifest;
@@ -205,6 +207,13 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     res.set({ 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'", 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Request-ID': req.id });
     res.on('finish', () => logger.info?.(JSON.stringify({ requestId: req.id, method: req.method, path: req.path, status: res.statusCode, durationMs: Math.round(performance.now() - started) })));
     next();
+  });
+  const pdfMaker = createPdfMaker({ config: pdfMakerConfig, converter: pdfMakerConverter, logger, startCleanup: pdfMakerStartCleanup, removePath: pdfMakerRemovePath });
+  app.locals.pdfMaker = pdfMaker;
+  app.use('/api/pdf-maker', pdfMaker.router);
+  app.use('/api/pdf-maker', (error, req, res, next) => {
+    if (error?.type === 'entity.too.large') return res.status(413).json({ error: { code: 'REQUEST_TOO_LARGE', message: 'The upload request is too large.' } });
+    return next(error);
   });
   const cache = (kind) => mode === 'production' && kind === 'asset' ? 'public, max-age=31536000, immutable' : 'no-cache';
   const page = (req, res, status, options) => res.status(status).set('Cache-Control', cache('html')).type('html')
