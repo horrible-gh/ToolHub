@@ -1,11 +1,13 @@
 import sampleTool from './sample-tool/index.js';
 import randomNumberTool from './random-number/index.js';
+import pdfMakerTool from './pdf-maker/index.js';
 
 export const DEFAULT_GROUP = 'Tools';
 
 export const registrations = [
   { id: 'sample-tool', name: 'Sample Tool', description: 'A read-only ToolHub extension example.', tags: ['sample', 'read-only'], group: 'Sample', icon: '≡', active: true, module: sampleTool },
-  { id: 'random-number', name: 'Random Number', description: 'Generate random integers inside a selected range.', tags: ['random', 'number', 'utility'], group: 'Utility', icon: '#', active: true, module: randomNumberTool }
+  { id: 'random-number', name: 'Random Number', description: 'Generate random integers inside a selected range.', tags: ['random', 'number', 'utility'], group: 'Utility', icon: '#', active: true, module: randomNumberTool },
+  { id: 'pdf-maker', name: 'PDF-Maker', description: 'Convert Word and PowerPoint documents to downloadable PDFs.', tags: ['pdf', 'document', 'converter'], group: 'Document', icon: 'P', active: true, module: pdfMakerTool }
 ];
 export const toolIdPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 

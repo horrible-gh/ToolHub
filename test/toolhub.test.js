@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { createApp, describeMissingPath, filterTools } from '../server/app.js';
 import { loadConfig } from '../server/config.js';
 import { describeRandomNumberArguments, describeRandomNumberResult, initRandomNumber } from '../client/src/tools/random-number.js';
+import { formatBytes, initPdfMaker, validatePdfMakerFiles } from '../client/src/tools/pdf-maker.js';
 import { formatDuration, formatRelativeTime, truncate } from '../client/src/format.js';
 import { sortToolRows, statusLabel } from '../client/src/shell.js';
 import { closestToolId, groupTools, registrations, tagCounts, toolIcon, validateRegistry } from '../tools/registry.js';
@@ -31,7 +32,7 @@ test('routes, assets, headers and safe errors', async (t) => {
     assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
     assert.match(response.headers.get('x-request-id'), /^[A-Za-z0-9_-]{1,80}$/);
   };
-  for (const route of ['/', '/dashboard', '/tools', '/tools/sample-tool', '/tools/random-number']) {
+  for (const route of ['/', '/dashboard', '/tools', '/tools/sample-tool', '/tools/random-number', '/tools/pdf-maker']) {
     const r = await fetch(base + route);
     assert.equal(r.status, 200);
     assertSecurityHeaders(r);
@@ -48,7 +49,7 @@ test('routes, assets, headers and safe errors', async (t) => {
     assert.match(html, /<main id="main" class="pane">/);
     assert.match(html, /<nav class="crumb" aria-label="Breadcrumb">/);
     assert.match(html, /<p class="railfoot">Request ID: <code>/);
-    assert.match(html, /2 registered &middot; 2 active/);
+    assert.match(html, /3 registered &middot; 3 active/);
     assert.doesNotMatch(html, /tabindex="[1-9][0-9]*"/i);
   }
   assert.match(home, /href="\/dashboard" aria-current="page"/);
@@ -109,13 +110,14 @@ test('the workbench rail groups active tools and keeps its shape on every route'
   const notFound = await (await fetch(base + '/missing')).text();
   for (const html of [home, allTools, notFound]) {
     assert.doesNotMatch(html, /Hidden Tool|hidden-tool/);
-    assert.match(html, /<h2 class="rgroup" id="rail-group-0">Sample <span class="n">1<\/span><\/h2>/);
-    assert.match(html, /<h2 class="rgroup" id="rail-group-1">Utility <span class="n">1<\/span><\/h2>/);
+    assert.match(html, /<h2 class="rgroup" id="rail-group-0">Document <span class="n">1<\/span><\/h2>/);
+    assert.match(html, /<h2 class="rgroup" id="rail-group-1">Sample <span class="n">1<\/span><\/h2>/);
+    assert.match(html, /<h2 class="rgroup" id="rail-group-2">Utility <span class="n">1<\/span><\/h2>/);
     assert.match(html, /<h2 class="rgroup" id="rail-group-pinned" data-rail-pinned-heading hidden>/);
     assert.match(html, /<ul class="rail-list" aria-labelledby="rail-group-pinned" data-rail-pinned hidden><\/ul>/);
     assert.match(html, /data-rail-item data-tool-id="random-number" data-tool-name="Random Number"/);
     assert.match(html, /<form class="railsearch" role="search" action="\/tools" method="get">/);
-    assert.match(html, /3 registered &middot; 2 active/);
+    assert.match(html, /4 registered &middot; 3 active/);
   }
   assert.match(allTools, /No tools match your search/);
 });
@@ -146,7 +148,7 @@ test('home is a workbench summary and all-tools is a filterable table', async (t
   assert.match(tools, /<td class="mono" data-tool-lastused>&mdash;<\/td>/);
   assert.match(tools, /data-pin-toggle data-tool-id="random-number" aria-pressed="false" hidden/);
   assert.match(tools, /<select id="tools-sort" data-tools-sort hidden>/);
-  assert.match(tools, /<a class="chip on" href="\/tools">All 2<\/a>/);
+  assert.match(tools, /<a class="chip on" href="\/tools">All 3<\/a>/);
   assert.match(tools, /<a class="chip" href="\/tools\?tag=utility">#utility 1<\/a>/);
 });
 
@@ -168,7 +170,7 @@ test('all-tools combines the search box and tag chips with AND', async (t) => {
   assert.match(contradiction, /href="\/tools">Clear search and show all tools/);
   const combined = await (await fetch(base + '/tools?q=random&tag=utility')).text();
   assert.match(combined, /data-tool-row data-tool-id="random-number"/);
-  assert.match(combined, /1 of 2 tools match/);
+  assert.match(combined, /1 of 3 tools match/);
   assert.match(combined, /href="\/tools\?q=random&amp;tag=number"/);
 
   const { matches } = filterTools(validateRegistry(registrations), { q: ' NUMBER ', tag: 'Utility' });
@@ -252,14 +254,45 @@ test('a missing tool path suggests the closest registered tool', async (t) => {
 test('rail grouping, tag counts and icons come from registry metadata', () => {
   const active = validateRegistry(registrations);
   assert.deepEqual(groupTools(active).map(({ group, items }) => [group, items.map(({ id }) => id)]),
-    [['Sample', ['sample-tool']], ['Utility', ['random-number']]]);
+    [['Document', ['pdf-maker']], ['Sample', ['sample-tool']], ['Utility', ['random-number']]]);
   assert.deepEqual(tagCounts(active), [
-    { tag: 'number', count: 1 }, { tag: 'random', count: 1 }, { tag: 'read-only', count: 1 },
+    { tag: 'converter', count: 1 }, { tag: 'document', count: 1 }, { tag: 'number', count: 1 },
+    { tag: 'pdf', count: 1 }, { tag: 'random', count: 1 }, { tag: 'read-only', count: 1 },
     { tag: 'sample', count: 1 }, { tag: 'utility', count: 1 }
   ]);
   assert.equal(toolIcon(active.find(({ id }) => id === 'random-number')), '#');
   assert.equal(toolIcon({ name: 'ungrouped tool' }), 'U');
   assert.deepEqual(groupTools([{ id: 'x', name: 'X', tags: [] }]).map(({ group }) => group), ['Tools']);
+});
+
+test('PDF-Maker is registered with an accessible server-rendered upload surface', async (t) => {
+  const tool = registrations.find(({ id }) => id === 'pdf-maker');
+  assert.deepEqual({ group: tool.group, tags: tool.tags, active: tool.active }, { group: 'Document', tags: ['pdf', 'document', 'converter'], active: true });
+  const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const html = await (await fetch('http://127.0.0.1:' + server.address().port + '/tools/pdf-maker')).text();
+  assert.match(html, /data-tool-id="pdf-maker"/);
+  assert.match(html, /data-pdf-drop/);
+  assert.match(html, /type="file" accept=".docx,.pptx" multiple/);
+  assert.match(html, /data-pdf-live aria-live="polite"/);
+  assert.match(html, /data-pdf-convert disabled/);
+  assert.doesNotMatch(html, /onclick=|<script(?![^>]* src=)/i);
+});
+
+test('PDF-Maker client validation mirrors the documented browser limits', () => {
+  const files = [
+    { name: 'report.docx', size: 1024 },
+    { name: 'slides.PPTX', size: 2 * 1024 * 1024 },
+    { name: 'notes.txt', size: 5 },
+    { name: 'large.docx', size: 25 * 1024 * 1024 + 1 }
+  ];
+  const result = validatePdfMakerFiles(files);
+  assert.deepEqual(result.accepted.map(({ name }) => name), ['report.docx', 'slides.PPTX']);
+  assert.equal(result.rejected.length, 2);
+  assert.equal(validatePdfMakerFiles([{ name: 'extra.docx', size: 1 }], 10).accepted.length, 0);
+  assert.equal(formatBytes(1024), '1.00 KB');
+  assert.equal(formatBytes(25 * 1024 * 1024), '25.0 MB');
 });
 
 test('random number registry metadata is active', () => {
@@ -686,4 +719,213 @@ test('state rendering sources use safe DOM APIs without innerHTML', async () => 
     assert.match(source, /textContent/);
     assert.match(source, /replaceChildren/);
   }
+});
+
+
+function createFakeElement(tag) {
+  const el = {
+    tagName: tag.toUpperCase(),
+    _attrs: new Map(),
+    children: [],
+    parentNode: null,
+    _listeners: {},
+    hidden: false,
+    disabled: false,
+    value: '',
+    _text: '',
+    get textContent() { return this._text; },
+    set textContent(v) { this._text = v; this.children.forEach((c) => { c.parentNode = null; }); this.children = []; },
+    get className() { return this._attrs.get('class') || ''; },
+    set className(v) { this._attrs.set('class', v); },
+    classList: {
+      add(...cls) { const set = new Set((el._attrs.get('class') || '').split(' ').filter(Boolean)); cls.forEach((c) => set.add(c)); el._attrs.set('class', [...set].join(' ')); },
+      remove(...cls) { const set = new Set((el._attrs.get('class') || '').split(' ').filter(Boolean)); cls.forEach((c) => set.delete(c)); el._attrs.set('class', [...set].join(' ')); },
+      contains(c) { return (el._attrs.get('class') || '').split(' ').includes(c); }
+    },
+    setAttribute(name, value) { this._attrs.set(name, String(value)); },
+    getAttribute(name) { return this._attrs.has(name) ? this._attrs.get(name) : null; },
+    hasAttribute(name) { return this._attrs.has(name); },
+    append(...nodes) { nodes.forEach((n) => this.appendChild(n)); },
+    appendChild(node) { if (node.parentNode) node.parentNode.removeChild(node); this.children.push(node); node.parentNode = this; return node; },
+    removeChild(node) { this.children = this.children.filter((c) => c !== node); node.parentNode = null; return node; },
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    insertBefore(node, ref) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+      const idx = ref ? this.children.indexOf(ref) : -1;
+      if (idx === -1) this.children.push(node); else this.children.splice(idx, 0, node);
+      node.parentNode = this;
+      return node;
+    },
+    replaceChildren(...nodes) { this.children.forEach((c) => { c.parentNode = null; }); this.children = []; nodes.forEach((n) => this.appendChild(n)); },
+    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); },
+    removeEventListener(type, fn) { this._listeners[type] = (this._listeners[type] || []).filter((f) => f !== fn); },
+    contains(node) { let n = node; while (n) { if (n === this) return true; n = n.parentNode; } return false; },
+    querySelector(selector) {
+      const match = /^\[([a-zA-Z0-9-]+)\]$/.exec(selector.trim());
+      if (!match) throw new Error('unsupported selector in test fake DOM: ' + selector);
+      const attr = match[1];
+      const search = (node) => {
+        for (const child of node.children) {
+          if (child.hasAttribute(attr)) return child;
+          const found = search(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return search(this);
+    }
+  };
+  return el;
+}
+
+function createFakeDocument() {
+  const doc = createFakeElement('#document');
+  doc.body = createFakeElement('body');
+  doc.createElement = (tag) => createFakeElement(tag);
+  return doc;
+}
+
+async function fire(el, type, evt = {}) {
+  const handlers = el._listeners[type] || [];
+  const event = { preventDefault() {}, target: el, ...evt };
+  await Promise.all(handlers.map((fn) => fn(event)));
+}
+
+function buildPdfMakerSurface() {
+  const surface = createFakeElement('section');
+  const input = createFakeElement('input'); input.setAttribute('data-pdf-input', '');
+  const drop = createFakeElement('div'); drop.setAttribute('data-pdf-drop', '');
+  const work = createFakeElement('section'); work.setAttribute('data-pdf-work', ''); work.hidden = true;
+  const body = createFakeElement('tbody'); body.setAttribute('data-pdf-files', '');
+  const summary = createFakeElement('p'); summary.setAttribute('data-pdf-summary', '');
+  const error = createFakeElement('div'); error.setAttribute('data-pdf-error', ''); error.hidden = true;
+  const live = createFakeElement('p'); live.setAttribute('data-pdf-live', '');
+  const convert = createFakeElement('button'); convert.setAttribute('data-pdf-convert', ''); convert.disabled = true;
+  const clear = createFakeElement('button'); clear.setAttribute('data-pdf-clear', '');
+  const results = createFakeElement('div'); results.setAttribute('data-pdf-results', ''); results.hidden = true;
+  const resultSummary = createFakeElement('p'); resultSummary.setAttribute('data-pdf-result-summary', '');
+  const zip = createFakeElement('button'); zip.setAttribute('data-pdf-zip', ''); zip.hidden = true;
+  const finish = createFakeElement('button'); finish.setAttribute('data-pdf-finish', '');
+  work.append(body, summary, error, live, convert, clear, results, resultSummary, zip, finish);
+  surface.append(input, drop, work);
+  return { surface, input, drop, work, body, summary, error, live, convert, clear, results, resultSummary, zip, finish };
+}
+
+const PDF_MAKER_ACCEPTED = {
+  jobId: 'job-1',
+  accessToken: 'token-1',
+  status: 'queued',
+  counts: { succeeded: 0, failed: 0 },
+  expiresAt: new Date(Date.now() + 3600000).toISOString(),
+  files: [
+    { id: 'f1', name: 'alpha.docx', status: 'queued' },
+    { id: 'f2', name: 'beta.pptx', status: 'queued' }
+  ]
+};
+
+const PDF_MAKER_TICK1 = {
+  ...PDF_MAKER_ACCEPTED,
+  status: 'converting',
+  counts: { succeeded: 1, failed: 0 },
+  files: [
+    { id: 'f1', name: 'alpha.docx', status: 'succeeded', downloadable: true },
+    { id: 'f2', name: 'beta.pptx', status: 'converting' }
+  ]
+};
+
+const PDF_MAKER_TICK2_TERMINAL = {
+  ...PDF_MAKER_ACCEPTED,
+  status: 'partial',
+  counts: { succeeded: 1, failed: 1 },
+  files: [
+    { id: 'f1', name: 'alpha.docx', status: 'succeeded', downloadable: true },
+    { id: 'f2', name: 'beta.pptx', status: 'failed', error: 'CONVERTER_FAILED' }
+  ]
+};
+
+async function withPdfMakerDocument(run) {
+  const previous = globalThis.document;
+  globalThis.document = createFakeDocument();
+  try {
+    await run();
+  } finally {
+    globalThis.document = previous;
+  }
+}
+
+test('pdf-maker keeps a succeeded row\'s download control stable across a later status-poll tick', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildPdfMakerSurface();
+    let getCalls = 0;
+    let midPollDownloadBtn = null;
+    const fetchMock = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      if (method === 'POST' && url === '/api/pdf-maker/jobs') return { ok: true, status: 200, json: async () => PDF_MAKER_ACCEPTED };
+      if (method === 'GET' && url === '/api/pdf-maker/jobs/job-1') {
+        getCalls += 1;
+        if (getCalls === 1) return { ok: true, status: 200, json: async () => PDF_MAKER_TICK1 };
+        midPollDownloadBtn = h.body.children[0].children[4].children[0];
+        return { ok: true, status: 200, json: async () => PDF_MAKER_TICK2_TERMINAL };
+      }
+      throw new Error('unexpected fetch ' + method + ' ' + url);
+    };
+    initPdfMaker(h.surface, { fetch: fetchMock, delay: () => Promise.resolve() });
+    h.input.files = [new File(['a'], 'alpha.docx'), new File(['b'], 'beta.pptx')];
+    await fire(h.input, 'change');
+    await fire(h.convert, 'click');
+
+    assert.equal(getCalls, 2);
+    assert.ok(midPollDownloadBtn, 'expected the first poll tick to have rendered a download control');
+    assert.equal(h.body.children.length, 2);
+    const f1Actions = h.body.children[0].children[4];
+    assert.equal(f1Actions.children[0], midPollDownloadBtn, 'the download control for an already-succeeded file must not be recreated by a later poll tick');
+    assert.equal(h.results.hidden, false);
+    assert.match(h.resultSummary.textContent, /1 converted - 1 failed/);
+  });
+});
+
+test('pdf-maker remove control exposes an accessible name that includes the file name', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildPdfMakerSurface();
+    initPdfMaker(h.surface, { fetch: async () => { throw new Error('fetch should not be called'); }, delay: () => Promise.resolve() });
+    h.input.files = [new File(['a'], 'alpha.docx'), new File(['b'], 'beta.pptx')];
+    await fire(h.input, 'change');
+
+    assert.equal(h.body.children.length, 2);
+    const removeButtons = h.body.children.map((row) => row.children[4].children[0]);
+    assert.equal(removeButtons[0].getAttribute('aria-label'), 'Remove alpha.docx');
+    assert.equal(removeButtons[1].getAttribute('aria-label'), 'Remove beta.pptx');
+  });
+});
+
+test('pdf-maker closes download actions once a job is reported expired mid-poll', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildPdfMakerSurface();
+    let getCalls = 0;
+    const fetchMock = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      if (method === 'POST' && url === '/api/pdf-maker/jobs') return { ok: true, status: 200, json: async () => PDF_MAKER_ACCEPTED };
+      if (method === 'GET' && url === '/api/pdf-maker/jobs/job-1') {
+        getCalls += 1;
+        if (getCalls === 1) return { ok: true, status: 200, json: async () => PDF_MAKER_TICK1 };
+        return { ok: false, status: 410, json: async () => ({}) };
+      }
+      throw new Error('unexpected fetch ' + method + ' ' + url);
+    };
+    initPdfMaker(h.surface, { fetch: fetchMock, delay: () => Promise.resolve() });
+    h.input.files = [new File(['a'], 'alpha.docx'), new File(['b'], 'beta.pptx')];
+    await fire(h.input, 'change');
+    await fire(h.convert, 'click');
+
+    assert.equal(getCalls, 2);
+    assert.equal(h.error.hidden, false);
+    assert.match(h.error.textContent, /expired/i);
+    assert.equal(h.results.hidden, true, 'result/download actions must close once the job is reported expired');
+    for (const row of h.body.children) {
+      for (const btn of row.children[4].children) {
+        assert.notEqual(btn.textContent, 'Download PDF', 'no stale download control should remain visible after expiry');
+      }
+    }
+    assert.equal(h.convert.disabled, false, 'the user must be able to retry conversion after an expired job is closed');
+  });
 });
