@@ -277,7 +277,8 @@ test('PDF-Maker is registered with an accessible server-rendered upload surface'
   const html = await (await fetch('http://127.0.0.1:' + server.address().port + '/tools/pdf-maker')).text();
   assert.match(html, /data-tool-id="pdf-maker"/);
   assert.match(html, /data-pdf-drop/);
-  assert.match(html, /type="file" accept=".docx,.pptx" multiple/);
+  assert.match(html, /Drop Word, PowerPoint, or Markdown files here/);
+  assert.match(html, /type="file" accept=".docx,.pptx,.md,.markdown" multiple/);
   assert.match(html, /data-pdf-live aria-live="polite"/);
   assert.match(html, /data-pdf-convert disabled/);
   assert.doesNotMatch(html, /onclick=|<script(?![^>]* src=)/i);
@@ -296,6 +297,18 @@ test('PDF-Maker client validation mirrors the documented browser limits', () => 
   assert.equal(validatePdfMakerFiles([{ name: 'extra.docx', size: 1 }], 10).accepted.length, 0);
   assert.equal(formatBytes(1024), '1.00 KB');
   assert.equal(formatBytes(25 * 1024 * 1024), '25.0 MB');
+});
+
+test('PDF-Maker client validation accepts Markdown extensions and keeps rejecting unsupported ones', () => {
+  const files = [
+    { name: 'notes.md', size: 1024 },
+    { name: 'README.MARKDOWN', size: 2048 },
+    { name: 'image.png', size: 512 }
+  ];
+  const result = validatePdfMakerFiles(files);
+  assert.deepEqual(result.accepted.map(({ name }) => name), ['notes.md', 'README.MARKDOWN']);
+  assert.equal(result.rejected.length, 1);
+  assert.match(result.rejected[0], /only DOCX, PPTX, and Markdown \(\.md\/\.markdown\) files are supported\./);
 });
 
 test('MD Viewer is registered with an accessible server-rendered upload surface', async (t) => {
@@ -977,6 +990,27 @@ test('pdf-maker closes download actions once a job is reported expired mid-poll'
       }
     }
     assert.equal(h.convert.disabled, false, 'the user must be able to retry conversion after an expired job is closed');
+  });
+});
+
+test('pdf-maker reports a format-neutral message for a failed Markdown upload, not Word/PowerPoint-specific text', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildPdfMakerSurface();
+    const fetchMock = async (url, opts) => {
+      const method = opts?.method || 'GET';
+      if (method === 'POST' && url === '/api/pdf-maker/jobs') {
+        return { ok: true, status: 200, json: async () => ({ jobId: 'job-2', accessToken: 'token-2', status: 'failed', counts: { succeeded: 0, failed: 1 }, expiresAt: new Date(Date.now() + 3600000).toISOString(), files: [{ id: 'f1', name: 'broken.md', status: 'failed', error: { code: 'INVALID_DOCUMENT', message: 'The document is damaged or does not match its file type.' } }] }) };
+      }
+      throw new Error('unexpected fetch ' + method + ' ' + url);
+    };
+    initPdfMaker(h.surface, { fetch: fetchMock, delay: () => Promise.resolve() });
+    h.input.files = [new File(['not really markdown'], 'broken.md')];
+    await fire(h.input, 'change');
+    await fire(h.convert, 'click');
+    const statusCell = h.body.children[0].children[3];
+    assert.equal(statusCell.textContent, 'This file is damaged or does not match its file type.');
+    assert.doesNotMatch(statusCell.textContent, /Word or PowerPoint/i);
+    assert.notEqual(statusCell.textContent, 'Conversion failed.', 'the format-neutral message must not silently fall back to the generic default');
   });
 });
 

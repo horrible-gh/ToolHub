@@ -3,10 +3,10 @@ export function render() {
     <div class="pdf-drop" data-pdf-drop>
       <div class="pdf-drop-icon" aria-hidden="true">PDF</div>
       <h2 id="pdf-maker-heading">Convert documents to PDF</h2>
-      <p>Drop Word or PowerPoint files here, or choose them from your device.</p>
+      <p>Drop Word, PowerPoint, or Markdown files here, or choose them from your device.</p>
       <label class="pdf-choose" for="pdf-maker-files">Choose files</label>
-      <input class="visually-hidden" id="pdf-maker-files" data-pdf-input type="file" accept=".docx,.pptx" multiple>
-      <p class="pdf-drop-help">DOCX and PPTX &middot; up to 10 files &middot; 25 MB each</p>
+      <input class="visually-hidden" id="pdf-maker-files" data-pdf-input type="file" accept=".docx,.pptx,.md,.markdown" multiple>
+      <p class="pdf-drop-help">DOCX, PPTX, and Markdown (.md/.markdown) &middot; up to 10 files &middot; 25 MB each</p>
     </div>
     <p class="pdf-privacy">Files are converted on the server and automatically deleted after the retention period. Do not upload documents you are not permitted to process.</p>
     <div class="alert" data-pdf-error role="alert" hidden></div>
@@ -31,7 +31,7 @@ export function render() {
       </div>
     </section>
     <p class="visually-hidden" data-pdf-live aria-live="polite" aria-atomic="true"></p>
-    <noscript><p class="alert">JavaScript is required to upload and convert documents. Supported files are DOCX and PPTX.</p></noscript>
+    <noscript><p class="alert">JavaScript is required to upload and convert documents. Supported files are DOCX, PPTX, and Markdown (.md/.markdown).</p></noscript>
   </section>`;
 }
 
