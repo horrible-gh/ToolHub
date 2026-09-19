@@ -27,9 +27,10 @@ export function loadConfig(env = process.env) {
   const requestMaxBytes = integer(env, 'PDF_MAKER_REQUEST_MAX_BYTES', 75 * 1024 * 1024, fileMaxBytes, 500 * 1024 * 1024);
   const storageRoot = path.resolve(env.PDF_MAKER_STORAGE_ROOT || path.join(os.tmpdir(), 'toolhub-pdf-maker'));
   if (inside(storageRoot, projectRoot) || inside(projectRoot, storageRoot)) throw Object.assign(new Error('PDF_MAKER_STORAGE_ROOT must be outside the application source tree'), { code: 'INVALID_ENV' });
-  const rawExtensions = env.PDF_MAKER_ALLOWED_EXTENSIONS || '.docx,.pptx';
+  const rawExtensions = env.PDF_MAKER_ALLOWED_EXTENSIONS || '.docx,.pptx,.md,.markdown';
   const allowedExtensions = [...new Set(rawExtensions.split(',').map((value) => value.trim().toLowerCase()))];
-  if (!allowedExtensions.length || allowedExtensions.some((value) => !/^\.[a-z0-9]{1,10}$/.test(value)) || !allowedExtensions.includes('.docx') || !allowedExtensions.includes('.pptx')) throw Object.assign(new Error('PDF_MAKER_ALLOWED_EXTENSIONS must be a comma-separated list including .docx and .pptx'), { code: 'INVALID_ENV' });
+  const requiredExtensions = ['.docx', '.pptx', '.md', '.markdown'];
+  if (!allowedExtensions.length || allowedExtensions.some((value) => !/^\.[a-z0-9]{1,10}$/.test(value)) || requiredExtensions.some((required) => !allowedExtensions.includes(required))) throw Object.assign(new Error('PDF_MAKER_ALLOWED_EXTENSIONS must be a comma-separated list including .docx, .pptx, .md, and .markdown'), { code: 'INVALID_ENV' });
   return {
     host: env.HOST || '127.0.0.1', port, mode: env.NODE_ENV || 'development', logLevel: env.TOOLHUB_LOG_LEVEL || 'info',
     pdfMaker: {

@@ -187,7 +187,7 @@ function renderNotFound(missing, active) {
     '<p class="empty-links"><a href="/tools">Browse all tools &rarr;</a><span class="crumb-sep" aria-hidden="true">&middot;</span><a href="/">Back to the workbench</a></p></div>';
 }
 
-export function createApp({ tools = registrations, mode = 'development', logger = console, pdfMakerConfig = loadConfig().pdfMaker, pdfMakerConverter, pdfMakerStartCleanup = false, pdfMakerRemovePath } = {}) {
+export function createApp({ tools = registrations, mode = 'development', logger = console, pdfMakerConfig = loadConfig().pdfMaker, pdfMakerConverter, pdfMakerMarkdownConverter, pdfMakerStartCleanup = false, pdfMakerRemovePath } = {}) {
   const active = validateRegistry(tools);
   const total = tools.length;
   let manifest;
@@ -208,7 +208,7 @@ export function createApp({ tools = registrations, mode = 'development', logger 
     res.on('finish', () => logger.info?.(JSON.stringify({ requestId: req.id, method: req.method, path: req.path, status: res.statusCode, durationMs: Math.round(performance.now() - started) })));
     next();
   });
-  const pdfMaker = createPdfMaker({ config: pdfMakerConfig, converter: pdfMakerConverter, logger, startCleanup: pdfMakerStartCleanup, removePath: pdfMakerRemovePath });
+  const pdfMaker = createPdfMaker({ config: pdfMakerConfig, converter: pdfMakerConverter, markdownConverter: pdfMakerMarkdownConverter, logger, startCleanup: pdfMakerStartCleanup, removePath: pdfMakerRemovePath });
   app.locals.pdfMaker = pdfMaker;
   app.use('/api/pdf-maker', pdfMaker.router);
   app.use('/api/pdf-maker', (error, req, res, next) => {

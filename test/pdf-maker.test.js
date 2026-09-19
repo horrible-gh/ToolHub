@@ -6,9 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter, once } from 'node:events';
 import { spawn } from 'node:child_process';
+import zlib from 'node:zlib';
 import { createApp } from '../server/app.js';
 import { defaultLibreOfficePath, loadConfig } from '../server/config.js';
-import { inspectOoxml, libreOfficeConverter, makeZip, officeConverter } from '../server/pdf-maker.js';
+import { inspectMarkdown, inspectOoxml, libreOfficeConverter, makeZip, officeConverter } from '../server/pdf-maker.js';
 
 const pdf = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF');
 const xml = (body) => Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${body}`, 'utf8');
@@ -46,6 +47,39 @@ function findLibreOfficeExecutable() {
   if (path.isAbsolute(candidate)) return fsSync.existsSync(candidate) ? candidate : null;
   return process.platform === 'win32' ? null : candidate;
 }
+// LibreOffice's Writer/Web HTML import gives each source line its own BT..ET text object with
+// a single absolute "x y Td" position (confirmed by decompiling this pipeline's own generated
+// PDF content streams), so the vertical line-to-line gap is the difference between consecutive
+// lines' Td y-values within the same (FlateDecode-compressed) content stream -- which is
+// exactly what the body-top-margin regression inflates.
+function analyzeTextLineAdvances(pdfBuffer) {
+  const pdfText = pdfBuffer.toString('latin1');
+  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let maxGap = 0;
+  let lineCount = 0;
+  let match;
+  while ((match = streamPattern.exec(pdfText))) {
+    let content;
+    try {
+      content = zlib.inflateSync(Buffer.from(match[1], 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    if (!content.includes('BT') || !content.includes('Td')) continue;
+    const yPositions = [];
+    for (const block of content.split('BT').slice(1)) {
+      const body = block.split('ET')[0];
+      const lineMatch = body.match(/(-?[\d.]+)\s+(-?[\d.]+)\s+Td\b/);
+      if (lineMatch) yPositions.push(Number(lineMatch[2]));
+    }
+    lineCount += yPositions.length;
+    for (let index = 1; index < yPositions.length; index += 1) {
+      const gap = Math.abs(yPositions[index - 1] - yPositions[index]);
+      if (gap > maxGap) maxGap = gap;
+    }
+  }
+  return { maxGap, lineCount };
+}
 const encryptedOfficeContainer = () => {
   const header = Buffer.alloc(512, 0); const directory = Buffer.alloc(512, 0); const fat = Buffer.alloc(512, 0xff);
   Buffer.from('d0cf11e0a1b11ae1', 'hex').copy(header); header.writeUInt16LE(0x003e, 24); header.writeUInt16LE(3, 26);
@@ -80,13 +114,13 @@ const encryptedOfficeDifatContainer = () => {
   return Buffer.concat([header, ...sectors]);
 };
 const configFor = (root, overrides = {}) => ({
-  allowedExtensions: ['.docx', '.pptx'], fileMaxBytes: 1024 * 1024, requestMaxBytes: 2 * 1024 * 1024,
+  allowedExtensions: ['.docx', '.pptx', '.md', '.markdown'], fileMaxBytes: 1024 * 1024, requestMaxBytes: 2 * 1024 * 1024,
   maxFiles: 4, timeoutMs: 1000, concurrency: 2, queueLimit: 8, retentionMs: 60000,
   cleanupIntervalMs: 60000, storageRoot: root, runtimeRoot: path.join(os.tmpdir(), 'th-pdf-rt'), libreOfficePath: 'unused', ...overrides
 });
-async function harness(t, { converter, config = {}, logger = { info() {}, warn() {} }, removePath } = {}) {
+async function harness(t, { converter, markdownConverter, config = {}, logger = { info() {}, warn() {} }, removePath } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'toolhub-pdf-maker-test-'));
-  const app = createApp({ logger, pdfMakerConfig: configFor(root, config), pdfMakerRemovePath: removePath, pdfMakerConverter: converter || (async ({ outputDir, inputPath }) => { const result = path.join(outputDir, `${path.basename(inputPath, path.extname(inputPath))}.pdf`); await fs.writeFile(result, pdf); return result; }) });
+  const app = createApp({ logger, pdfMakerConfig: configFor(root, config), pdfMakerRemovePath: removePath, pdfMakerMarkdownConverter: markdownConverter, pdfMakerConverter: converter || (async ({ outputDir, inputPath }) => { const result = path.join(outputDir, `${path.basename(inputPath, path.extname(inputPath))}.pdf`); await fs.writeFile(result, pdf); return result; }) });
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { server.close(); await app.locals.pdfMaker.close(); await fs.rm(root, { recursive: true, force: true }); });
   return { app, root, base: `http://127.0.0.1:${server.address().port}` };
@@ -149,7 +183,8 @@ test('PDF-Maker validates OOXML, PDF-Maker environment bounds and storage isolat
   assert.equal(inspectOoxml(Buffer.from('PK damaged'), '.docx').code, 'INVALID_DOCUMENT');
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_CONCURRENCY: '0' }), { code: 'INVALID_ENV' });
   assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: process.cwd() }), { code: 'INVALID_ENV' });
-  const valid = loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-test') }); assert.deepEqual(valid.pdfMaker.allowedExtensions, ['.docx', '.pptx']);
+  const valid = loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-test') }); assert.deepEqual(valid.pdfMaker.allowedExtensions, ['.docx', '.pptx', '.md', '.markdown']);
+  assert.throws(() => loadConfig({ PORT: '6412', PDF_MAKER_STORAGE_ROOT: path.join(os.tmpdir(), 'toolhub-config-md-test'), PDF_MAKER_ALLOWED_EXTENSIONS: '.docx,.pptx' }), { code: 'INVALID_ENV' });
   assert.equal(valid.pdfMaker.engine, 'libreoffice');
   if (process.platform === 'win32') {
     assert.match(valid.pdfMaker.libreOfficePath, /soffice\.com$/i);
@@ -380,3 +415,170 @@ test('PDF-Maker retries failed cleanup, makes repeated cleanup idempotent, and l
   assert.ok(entries.some((entry) => entry.event === 'pdf_maker_cleanup' && entry.jobId === accepted.jobId && entry.removed === true));
 });
 
+
+test('PDF-Maker validates UTF-8 Markdown uploads and rejects NUL bytes, malformed UTF-8, and binary files masquerading as Markdown', async (t) => {
+  const validMarkdown = Buffer.from('# Title\n\nSome **markdown** body with a list:\n\n- one\n- two\n', 'utf8');
+  const nulByteMarkdown = Buffer.from('before\x00after', 'utf8');
+  const malformedUtf8 = Buffer.from([0x66, 0x6f, 0x6f, 0xc3, 0x28]);
+  assert.equal(inspectMarkdown(validMarkdown), null);
+  assert.equal(inspectMarkdown(nulByteMarkdown).code, 'INVALID_DOCUMENT');
+  assert.equal(inspectMarkdown(malformedUtf8).code, 'INVALID_DOCUMENT');
+  assert.equal(inspectMarkdown(ooxml('docx')).code, 'INVALID_DOCUMENT');
+  assert.equal(inspectMarkdown(encryptedOfficeContainer()).code, 'INVALID_DOCUMENT');
+  assert.equal(inspectMarkdown(pdf).code, 'INVALID_DOCUMENT');
+
+  const { base } = await harness(t, { markdownConverter: async ({ outputDir }) => { const result = path.join(outputDir, 'note.pdf'); await fs.writeFile(result, pdf); return result; } });
+  const response = await submit(base, [
+    ['note.md', validMarkdown],
+    ['disguised.md', ooxml('docx')],
+    ['broken.markdown', malformedUtf8]
+  ]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json();
+  const status = await finished(base, accepted);
+  assert.equal(status.status, 'partial');
+  assert.equal(status.files.find((file) => file.name === 'note.md').status, 'succeeded');
+  assert.equal(status.files.find((file) => file.name === 'disguised.md').error.code, 'INVALID_DOCUMENT');
+  assert.equal(status.files.find((file) => file.name === 'broken.markdown').error.code, 'INVALID_DOCUMENT');
+});
+
+test('PDF-Maker never routes Markdown through Office COM automation, even when PDF_MAKER_ENGINE=office', async (t) => {
+  let officeInvoked = false; let markdownInvoked = false;
+  const officeStub = async () => { officeInvoked = true; throw Object.assign(new Error('office converter must not run for markdown'), { code: 'CONVERTER_FAILED' }); };
+  const markdownStub = async ({ outputDir, inputPath }) => {
+    markdownInvoked = true;
+    assert.match(inputPath, /i\.html$/);
+    const html = await fs.readFile(inputPath, 'utf8');
+    assert.match(html, /<!doctype html>/i);
+    assert.match(html, /Content-Security-Policy/i);
+    const result = path.join(outputDir, 'md.pdf'); await fs.writeFile(result, pdf); return result;
+  };
+  const { base } = await harness(t, { config: { engine: 'office' }, converter: officeStub, markdownConverter: markdownStub });
+  const response = await submit(base, [['note.md', Buffer.from('# Heading\n\nBody text.\n', 'utf8')]]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json();
+  const status = await finished(base, accepted);
+  assert.equal(status.status, 'succeeded');
+  assert.equal(markdownInvoked, true);
+  assert.equal(officeInvoked, false);
+});
+
+test('PDF-Maker enforces the concurrency queue on the Markdown conversion path', async (t) => {
+  let release; const blocker = new Promise((resolve) => { release = resolve; });
+  const { base } = await harness(t, { config: { concurrency: 1, queueLimit: 1 }, markdownConverter: async ({ outputDir }) => { await blocker; const result = path.join(outputDir, 'note.pdf'); await fs.writeFile(result, pdf); return result; } });
+  const first = await submit(base, [['first.md', Buffer.from('# One\n', 'utf8')]]);
+  assert.equal(first.status, 202); const accepted = await first.json();
+  const saturated = await submit(base, [['second.md', Buffer.from('# Two\n', 'utf8')]]);
+  assert.equal(saturated.status, 503); assert.equal((await saturated.json()).error.code, 'QUEUE_FULL');
+  release(); const done = await finished(base, accepted); assert.equal(done.status, 'succeeded');
+});
+
+test('PDF-Maker maps a Markdown converter timeout to CONVERSION_TIMEOUT without exposing internals', async (t) => {
+  const { base } = await harness(t, { markdownConverter: async () => { throw Object.assign(new Error('secret libreoffice command and stderr'), { code: 'CONVERSION_TIMEOUT' }); } });
+  const response = await submit(base, [['slow.md', Buffer.from('# Slow\n', 'utf8')]]);
+  const accepted = await response.json(); const status = await finished(base, accepted);
+  assert.equal(status.status, 'failed'); assert.equal(status.files[0].error.code, 'CONVERSION_TIMEOUT');
+  assert.equal(JSON.stringify(status).includes('secret libreoffice command'), false);
+});
+
+test('LibreOffice timeout kills a real process tree on the Markdown job path', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'toolhub-pdf-md-timeout-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const pidFile = path.join(root, 'pids');
+  const script = "const {spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[1],process.pid+','+c.pid);setInterval(()=>{},1000)";
+  const { base } = await harness(t, {
+    config: { timeoutMs: 200 },
+    markdownConverter: (args) => libreOfficeConverter({ ...args, spawnImpl: () => spawn(process.execPath, ['-e', script, pidFile], { windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore' }) })
+  });
+  const response = await submit(base, [['stuck.md', Buffer.from('# Stuck\n', 'utf8')]]);
+  const accepted = await response.json();
+  const status = await finished(base, accepted, 400);
+  assert.equal(status.status, 'failed'); assert.equal(status.files[0].error.code, 'CONVERSION_TIMEOUT');
+  const pids = (await fs.readFile(pidFile, 'utf8')).split(',').map(Number);
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  for (let attempt = 0; attempt < 50 && pids.some(alive); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(pids.map(alive), [false, false]);
+});
+
+test('LibreOffice headless conversion produces a valid PDF from a Markdown fixture with Korean text, headings, lists, blockquote, a table, and a fenced code block', async (t) => {
+  const executable = findLibreOfficeExecutable();
+  if (!executable) {
+    t.skip(`no LibreOffice headless binary found at the configured runtime path: ${defaultLibreOfficePath()}`);
+    return;
+  }
+  const markdown = [
+    '# 제목 1',
+    '',
+    '## 제목 2',
+    '',
+    '한글 본문 텍스트입니다. PDF-Maker의 Markdown 변환 경로를 검증합니다.',
+    '',
+    '- 비순서 항목 1',
+    '- 비순서 항목 2',
+    '',
+    '1. 순서 항목 1',
+    '2. 순서 항목 2',
+    '',
+    '> 인용문 블록입니다.',
+    '',
+    '| 열1 | 열2 |',
+    '| --- | --- |',
+    '| 값1 | 값2 |',
+    '',
+    '```javascript',
+    'const answer = 42;',
+    '```',
+    ''
+  ].join('\n');
+  const { base } = await harness(t, { config: { libreOfficePath: executable, timeoutMs: 60000 } });
+  const response = await submit(base, [['korean-notes.md', Buffer.from(markdown, 'utf8')]]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json();
+  const status = await finished(base, accepted, 1000);
+  assert.equal(status.status, 'succeeded');
+  const download = await fetch(`${base}/api/pdf-maker/jobs/${status.jobId}/files/${status.files[0].id}`, { headers: { Authorization: `Bearer ${accepted.accessToken}` } });
+  const produced = Buffer.from(await download.arrayBuffer());
+  assert.equal(download.status, 200);
+  assert.equal(produced.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(produced.includes(Buffer.from('%%EOF')));
+});
+
+test('LibreOffice headless conversion keeps fenced code/text block line spacing from regressing to the pre-fix body-top-margin gap', async (t) => {
+  const executable = findLibreOfficeExecutable();
+  if (!executable) {
+    t.skip(`no LibreOffice headless binary found at the configured runtime path: ${defaultLibreOfficePath()}`);
+    return;
+  }
+  const markdown = [
+    'Paragraph A',
+    '',
+    '```text',
+    'line A',
+    'line B',
+    'line C',
+    '```',
+    '',
+    'Paragraph B',
+    ''
+  ].join('\n');
+  const { base } = await harness(t, { config: { libreOfficePath: executable, timeoutMs: 60000 } });
+  const response = await submit(base, [['fence-spacing.md', Buffer.from(markdown, 'utf8')]]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json();
+  const status = await finished(base, accepted, 1000);
+  assert.equal(status.status, 'succeeded');
+  const download = await fetch(`${base}/api/pdf-maker/jobs/${status.jobId}/files/${status.files[0].id}`, { headers: { Authorization: `Bearer ${accepted.accessToken}` } });
+  const produced = Buffer.from(await download.arrayBuffer());
+  assert.equal(download.status, 200);
+  assert.equal(produced.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(produced.includes(Buffer.from('%%EOF')));
+  const { maxGap, lineCount } = analyzeTextLineAdvances(produced);
+  // Paragraph A + 3 pre lines + Paragraph B each render as their own text line; fewer than 5
+  // would mean the 3-line fenced block collapsed into fewer lines during conversion.
+  assert.ok(lineCount >= 5, `expected at least 5 rendered text lines (2 paragraphs + 3 pre lines), got ${lineCount}`);
+  // Investigation (toolhub.tools-webserver.0007.0012-NR) measured ~11.35-28.35pt for normal
+  // paragraph/pre-internal transitions and ~62.35-76.95pt once the removed body top margin
+  // (18mm =~ 51.02pt) leaks into every pre-internal paragraph break. 35pt sits with margin
+  // above the normal ceiling and well below the regressed floor.
+  assert.ok(maxGap < 35, `expected max line-to-line advance under 35pt, got ${maxGap}`);
+});

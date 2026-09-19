@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import express from 'express';
+import { renderMarkdownToStandaloneHtml } from './markdown-renderer.js';
 
 export const PUBLIC_ERRORS = Object.freeze({
   UNSUPPORTED_FORMAT: 'This file type is not supported.',
@@ -129,6 +130,19 @@ export function inspectOoxml(buffer, extension) {
   if (!required || !names.has('[Content_Types].xml') || !names.has('_rels/.rels') || !names.has(required)) return publicFailure('INVALID_DOCUMENT');
   return null;
 }
+export const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown']);
+const MARKDOWN_BINARY_MAGIC = [
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0]),
+  Buffer.from('%PDF-', 'ascii')
+];
+export function inspectMarkdown(buffer) {
+  if (!Buffer.isBuffer(buffer)) return publicFailure('INVALID_DOCUMENT');
+  if (MARKDOWN_BINARY_MAGIC.some((magic) => buffer.length >= magic.length && buffer.subarray(0, magic.length).equals(magic))) return publicFailure('INVALID_DOCUMENT');
+  if (buffer.includes(0)) return publicFailure('INVALID_DOCUMENT');
+  try { new TextDecoder('utf-8', { fatal: true }).decode(buffer); } catch { return publicFailure('INVALID_DOCUMENT'); }
+  return null;
+}
 function parseDisposition(value) {
   const match = /name="([^"]+)"(?:;\s*filename="([^"]*)")?/i.exec(value || '');
   return match ? { field: match[1], filename: match[2] === undefined ? undefined : Buffer.from(match[2], 'latin1').toString('utf8') } : null;
@@ -243,10 +257,11 @@ export async function officeConverter({ inputPath, outputDir, timeoutMs, executa
   return outputPath;
 }
 
-export function createPdfMaker({ config, converter, logger = console, now = () => Date.now(), startCleanup = true, removePath = fsp.rm } = {}) {
+export function createPdfMaker({ config, converter, markdownConverter, logger = console, now = () => Date.now(), startCleanup = true, removePath = fsp.rm } = {}) {
   if (!config) throw new TypeError('pdf-maker config is required');
   const engine = config.engine || 'libreoffice';
   const selectedConverter = converter || (engine === 'office' ? officeConverter : libreOfficeConverter);
+  const selectedMarkdownConverter = markdownConverter || libreOfficeConverter;
   const jobs = new Map(); const queue = []; let running = 0; let closed = false;
   fs.mkdirSync(config.storageRoot, { recursive: true, mode: 0o700 });
   const runtimeRoot = path.resolve(config.runtimeRoot || path.join(os.tmpdir(), 'toolhub-pdf-maker-runtime'));
@@ -268,13 +283,24 @@ export function createPdfMaker({ config, converter, logger = console, now = () =
   const runFile = async (job, file) => {
     if (job.cleaned) return; transition(file, 'converting', logger, job); const began = now();
     const workDir = path.join(job.root, 'work', file.id); let runtimeDir;
+    const extension = path.extname(file.inputPath).toLowerCase(); const isMarkdown = MARKDOWN_EXTENSIONS.has(extension); const fileEngine = isMarkdown ? 'libreoffice' : engine;
     try {
       await fsp.mkdir(workDir, { recursive: true });
       runtimeDir = await fsp.mkdtemp(path.join(runtimeRoot, 'c-'));
-      const inputPath = path.join(runtimeDir, `i${path.extname(file.inputPath)}`);
       const stagedDir = path.join(runtimeDir, 'o'); const profileDir = path.join(runtimeDir, 'p');
-      await Promise.all([fsp.copyFile(file.inputPath, inputPath), fsp.mkdir(stagedDir), fsp.mkdir(profileDir)]);
-      const candidate = await selectedConverter({ inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: engine === 'office' ? config.powershellPath : config.libreOfficePath, jobId: job.id, fileId: file.id });
+      await fsp.mkdir(stagedDir); await fsp.mkdir(profileDir);
+      let candidate;
+      if (isMarkdown) {
+        const markdownText = await fsp.readFile(file.inputPath, 'utf8');
+        const title = path.basename(file.name, path.extname(file.name));
+        const htmlPath = path.join(runtimeDir, 'i.html');
+        await fsp.writeFile(htmlPath, renderMarkdownToStandaloneHtml(markdownText, { title }), 'utf8');
+        candidate = await selectedMarkdownConverter({ inputPath: htmlPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: config.libreOfficePath, jobId: job.id, fileId: file.id });
+      } else {
+        const inputPath = path.join(runtimeDir, `i${extension}`);
+        await fsp.copyFile(file.inputPath, inputPath);
+        candidate = await selectedConverter({ inputPath, outputDir: stagedDir, profileDir, timeoutMs: config.timeoutMs, executable: engine === 'office' ? config.powershellPath : config.libreOfficePath, jobId: job.id, fileId: file.id });
+      }
       if (job.cleaned) return;
       const realRuntime = await fsp.realpath(runtimeDir); const realStaged = await fsp.realpath(stagedDir); const realCandidate = await fsp.realpath(candidate);
       const within = (parent, child) => child === parent || child.startsWith(parent + path.sep);
@@ -287,7 +313,7 @@ export function createPdfMaker({ config, converter, logger = console, now = () =
       const pdf = await fsp.readFile(realCandidate); if (!validPdf(pdf)) throw Object.assign(new Error('invalid pdf'), { code: 'INVALID_PDF' });
       const destination = path.join(realResults, `${file.id}.pdf`); await fsp.writeFile(destination, pdf, { flag: 'wx' }); file.resultPath = destination; file.resultSize = pdf.length; transition(file, 'succeeded', logger, job);
     } catch (error) { if (!job.cleaned) { file.error = publicFailure(error.code === 'CONVERSION_TIMEOUT' ? 'CONVERSION_TIMEOUT' : error.code === 'INVALID_PDF' ? 'INVALID_PDF' : 'CONVERTER_FAILED'); transition(file, 'failed', logger, job); } }
-    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), runtimeDir ? fsp.rm(runtimeDir, { recursive: true, force: true }) : Promise.resolve()]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine }); }
+    finally { await Promise.allSettled([fsp.rm(workDir, { recursive: true, force: true }), runtimeDir ? fsp.rm(runtimeDir, { recursive: true, force: true }) : Promise.resolve()]); if (job.cleaned) await fsp.rm(job.root, { recursive: true, force: true }); log('info', { event: 'pdf_maker_conversion', jobId: job.id, fileId: file.id, status: file.status, errorCode: file.error?.code || null, durationMs: now() - began, engine: fileEngine }); }
   };
   const summary = (job) => {
     const counts = job.files.reduce((a, f) => { a[f.status] = (a[f.status] || 0) + 1; return a; }, {});
@@ -315,7 +341,7 @@ export function createPdfMaker({ config, converter, logger = console, now = () =
       if (rawName.includes('/') || rawName.includes('\\') || !config.allowedExtensions.includes(extension)) file.error = publicFailure('UNSUPPORTED_FORMAT');
       else if (!upload.data.length) file.error = publicFailure('INVALID_DOCUMENT');
       else if (upload.data.length > config.fileMaxBytes) file.error = publicFailure('FILE_TOO_LARGE');
-      else file.error = inspectOoxml(upload.data, extension);
+      else file.error = MARKDOWN_EXTENSIONS.has(extension) ? inspectMarkdown(upload.data) : inspectOoxml(upload.data, extension);
       job.files.push(file);
       if (file.error) transition(file, 'failed', logger, job);
       else { file.inputPath = path.join(root, 'inputs', `${file.id}${extension}`); await fsp.writeFile(file.inputPath, upload.data, { mode: 0o600 }); transition(file, 'queued', logger, job); }

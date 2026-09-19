@@ -1,15 +1,10 @@
-import { marked, Renderer } from 'marked';
-import createDOMPurify from 'dompurify';
 import { formatBytes } from './pdf-maker.js';
+import { renderMarkdownToSafeHtml } from '../../../shared/markdown-renderer.js';
+
+export { renderMarkdownToSafeHtml };
 
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = new Set(['md', 'markdown']);
-const RENDERER_SAFE_SCHEME = /^(https?:|mailto:)/i;
-const EXTERNAL_LINK_SCHEME = /^https?:/i;
-const PURIFY_ALLOWED_URI_REGEXP = /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i;
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
-const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'poster', 'background', 'action', 'formaction', 'cite', 'longdesc']);
-const FORBIDDEN_TAGS = ['style', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'link', 'meta', 'base', 'svg', 'math'];
 
 export function validateMdViewerFile(file) {
   if (!file) return { ok: false, message: 'No file was selected.' };
@@ -18,62 +13,6 @@ export function validateMdViewerFile(file) {
   if (file.size === 0) return { ok: false, message: file.name + ': the file is empty.' };
   if (file.size > MAX_FILE_BYTES) return { ok: false, message: file.name + ': file exceeds ' + formatBytes(MAX_FILE_BYTES) + '.' };
   return { ok: true };
-}
-
-const isSafeUrl = (href) => typeof href === 'string' && !CONTROL_CHARS.test(href) && RENDERER_SAFE_SCHEME.test(href.trim());
-const escapeAttr = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-class SafeRenderer extends Renderer {
-  link({ href, title, tokens }) {
-    const text = this.parser.parseInline(tokens);
-    if (!isSafeUrl(href)) return '<span class="md-unsupported-ref" title="Local and unsupported links cannot be opened">' + text + '</span>';
-    const titleAttr = title ? ' title="' + escapeAttr(title) + '"' : '';
-    return '<a href="' + escapeAttr(href) + '"' + titleAttr + ' rel="noopener noreferrer" target="_blank">' + text + '</a>';
-  }
-  image({ href, title, text, tokens }) {
-    const alt = tokens ? this.parser.parseInline(tokens, this.parser.textRenderer) : (text || '');
-    if (!isSafeUrl(href)) return '<span class="md-unsupported-ref" title="Local and unsupported images cannot be loaded">[Image not shown: ' + (alt || 'unsupported source') + ']</span>';
-    const titleAttr = title ? ' title="' + escapeAttr(title) + '"' : '';
-    return '<img src="' + escapeAttr(href) + '" alt="' + escapeAttr(alt) + '"' + titleAttr + ' loading="lazy">';
-  }
-}
-const safeRenderer = new SafeRenderer();
-
-const hookedInstances = new WeakSet();
-function ensureHook(purify) {
-  if (hookedInstances.has(purify)) return purify;
-  purify.addHook('uponSanitizeAttribute', (node, data) => {
-    if (URL_ATTRS.has(String(data.attrName).toLowerCase()) && !isSafeUrl(data.attrValue)) data.keepAttr = false;
-  });
-  purify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'A' && EXTERNAL_LINK_SCHEME.test((node.getAttribute('href') || '').trim())) {
-      node.setAttribute('rel', 'noopener noreferrer');
-      node.setAttribute('target', '_blank');
-    }
-  });
-  hookedInstances.add(purify);
-  return purify;
-}
-
-let cachedPurify = null;
-let cachedWindow = null;
-function getPurify(win) {
-  if (typeof createDOMPurify.sanitize === 'function') return ensureHook(createDOMPurify);
-  if (!win) throw new Error('Rendering Markdown requires a DOM window.');
-  if (cachedWindow !== win) {
-    cachedPurify = createDOMPurify(win);
-    cachedWindow = win;
-  }
-  return ensureHook(cachedPurify);
-}
-
-export function renderMarkdownToSafeHtml(markdown, { window: win } = {}) {
-  const rawHtml = marked.parse(String(markdown ?? ''), { renderer: safeRenderer });
-  return getPurify(win).sanitize(rawHtml, {
-    ALLOWED_URI_REGEXP: PURIFY_ALLOWED_URI_REGEXP,
-    ADD_ATTR: ['target'],
-    FORBID_TAGS: FORBIDDEN_TAGS
-  });
 }
 
 function addCopyButtons(container, announce, clipboard) {
