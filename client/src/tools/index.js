@@ -1,7 +1,8 @@
 import { initRandomNumber } from './random-number.js';
 import { initPdfMaker } from './pdf-maker.js';
+import { initMdViewer } from './md-viewer.js';
 
-const initializers = new Map([['random-number', initRandomNumber], ['pdf-maker', initPdfMaker]]);
+const initializers = new Map([['random-number', initRandomNumber], ['pdf-maker', initPdfMaker], ['md-viewer', initMdViewer]]);
 const initialized = new WeakSet();
 
 export function initTools(root = document) {
