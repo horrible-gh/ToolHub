@@ -8,6 +8,9 @@ import { createApp, describeMissingPath, filterTools } from '../server/app.js';
 import { loadConfig } from '../server/config.js';
 import { describeRandomNumberArguments, describeRandomNumberResult, initRandomNumber } from '../client/src/tools/random-number.js';
 import { formatBytes, initPdfMaker, validatePdfMakerFiles } from '../client/src/tools/pdf-maker.js';
+import { MAX_FILE_BYTES, initMdViewer, renderMarkdownToSafeHtml, validateMdViewerFile } from '../client/src/tools/md-viewer.js';
+import mdViewerModule from '../tools/md-viewer/index.js';
+import { JSDOM } from 'jsdom';
 import { formatDuration, formatRelativeTime, truncate } from '../client/src/format.js';
 import { sortToolRows, statusLabel } from '../client/src/shell.js';
 import { closestToolId, groupTools, registrations, tagCounts, toolIcon, validateRegistry } from '../tools/registry.js';
@@ -32,7 +35,7 @@ test('routes, assets, headers and safe errors', async (t) => {
     assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
     assert.match(response.headers.get('x-request-id'), /^[A-Za-z0-9_-]{1,80}$/);
   };
-  for (const route of ['/', '/dashboard', '/tools', '/tools/sample-tool', '/tools/random-number', '/tools/pdf-maker']) {
+  for (const route of ['/', '/dashboard', '/tools', '/tools/sample-tool', '/tools/random-number', '/tools/pdf-maker', '/tools/md-viewer']) {
     const r = await fetch(base + route);
     assert.equal(r.status, 200);
     assertSecurityHeaders(r);
@@ -49,7 +52,7 @@ test('routes, assets, headers and safe errors', async (t) => {
     assert.match(html, /<main id="main" class="pane">/);
     assert.match(html, /<nav class="crumb" aria-label="Breadcrumb">/);
     assert.match(html, /<p class="railfoot">Request ID: <code>/);
-    assert.match(html, /3 registered &middot; 3 active/);
+    assert.match(html, /4 registered &middot; 4 active/);
     assert.doesNotMatch(html, /tabindex="[1-9][0-9]*"/i);
   }
   assert.match(home, /href="\/dashboard" aria-current="page"/);
@@ -110,14 +113,14 @@ test('the workbench rail groups active tools and keeps its shape on every route'
   const notFound = await (await fetch(base + '/missing')).text();
   for (const html of [home, allTools, notFound]) {
     assert.doesNotMatch(html, /Hidden Tool|hidden-tool/);
-    assert.match(html, /<h2 class="rgroup" id="rail-group-0">Document <span class="n">1<\/span><\/h2>/);
+    assert.match(html, /<h2 class="rgroup" id="rail-group-0">Document <span class="n">2<\/span><\/h2>/);
     assert.match(html, /<h2 class="rgroup" id="rail-group-1">Sample <span class="n">1<\/span><\/h2>/);
     assert.match(html, /<h2 class="rgroup" id="rail-group-2">Utility <span class="n">1<\/span><\/h2>/);
     assert.match(html, /<h2 class="rgroup" id="rail-group-pinned" data-rail-pinned-heading hidden>/);
     assert.match(html, /<ul class="rail-list" aria-labelledby="rail-group-pinned" data-rail-pinned hidden><\/ul>/);
     assert.match(html, /data-rail-item data-tool-id="random-number" data-tool-name="Random Number"/);
     assert.match(html, /<form class="railsearch" role="search" action="\/tools" method="get">/);
-    assert.match(html, /4 registered &middot; 3 active/);
+    assert.match(html, /5 registered &middot; 4 active/);
   }
   assert.match(allTools, /No tools match your search/);
 });
@@ -148,7 +151,7 @@ test('home is a workbench summary and all-tools is a filterable table', async (t
   assert.match(tools, /<td class="mono" data-tool-lastused>&mdash;<\/td>/);
   assert.match(tools, /data-pin-toggle data-tool-id="random-number" aria-pressed="false" hidden/);
   assert.match(tools, /<select id="tools-sort" data-tools-sort hidden>/);
-  assert.match(tools, /<a class="chip on" href="\/tools">All 3<\/a>/);
+  assert.match(tools, /<a class="chip on" href="\/tools">All 4<\/a>/);
   assert.match(tools, /<a class="chip" href="\/tools\?tag=utility">#utility 1<\/a>/);
 });
 
@@ -170,7 +173,7 @@ test('all-tools combines the search box and tag chips with AND', async (t) => {
   assert.match(contradiction, /href="\/tools">Clear search and show all tools/);
   const combined = await (await fetch(base + '/tools?q=random&tag=utility')).text();
   assert.match(combined, /data-tool-row data-tool-id="random-number"/);
-  assert.match(combined, /1 of 3 tools match/);
+  assert.match(combined, /1 of 4 tools match/);
   assert.match(combined, /href="\/tools\?q=random&amp;tag=number"/);
 
   const { matches } = filterTools(validateRegistry(registrations), { q: ' NUMBER ', tag: 'Utility' });
@@ -254,11 +257,11 @@ test('a missing tool path suggests the closest registered tool', async (t) => {
 test('rail grouping, tag counts and icons come from registry metadata', () => {
   const active = validateRegistry(registrations);
   assert.deepEqual(groupTools(active).map(({ group, items }) => [group, items.map(({ id }) => id)]),
-    [['Document', ['pdf-maker']], ['Sample', ['sample-tool']], ['Utility', ['random-number']]]);
+    [['Document', ['md-viewer', 'pdf-maker']], ['Sample', ['sample-tool']], ['Utility', ['random-number']]]);
   assert.deepEqual(tagCounts(active), [
-    { tag: 'converter', count: 1 }, { tag: 'document', count: 1 }, { tag: 'number', count: 1 },
+    { tag: 'converter', count: 1 }, { tag: 'document', count: 2 }, { tag: 'markdown', count: 1 }, { tag: 'number', count: 1 },
     { tag: 'pdf', count: 1 }, { tag: 'random', count: 1 }, { tag: 'read-only', count: 1 },
-    { tag: 'sample', count: 1 }, { tag: 'utility', count: 1 }
+    { tag: 'sample', count: 1 }, { tag: 'utility', count: 1 }, { tag: 'viewer', count: 1 }
   ]);
   assert.equal(toolIcon(active.find(({ id }) => id === 'random-number')), '#');
   assert.equal(toolIcon({ name: 'ungrouped tool' }), 'U');
@@ -293,6 +296,40 @@ test('PDF-Maker client validation mirrors the documented browser limits', () => 
   assert.equal(validatePdfMakerFiles([{ name: 'extra.docx', size: 1 }], 10).accepted.length, 0);
   assert.equal(formatBytes(1024), '1.00 KB');
   assert.equal(formatBytes(25 * 1024 * 1024), '25.0 MB');
+});
+
+test('MD Viewer is registered with an accessible server-rendered upload surface', async (t) => {
+  const tool = registrations.find(({ id }) => id === 'md-viewer');
+  assert.deepEqual({ group: tool.group, tags: tool.tags, active: tool.active }, { group: 'Document', tags: ['markdown', 'viewer', 'document'], active: true });
+  const server = createApp({ logger: { info() {} } }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const html = await (await fetch('http://127.0.0.1:' + server.address().port + '/tools/md-viewer')).text();
+  assert.match(html, /data-tool-id="md-viewer"/);
+  assert.match(html, /data-md-drop/);
+  assert.match(html, /type="file" accept=".md,.markdown"/);
+  assert.match(html, /data-md-live aria-live="polite"/);
+  assert.match(html, /data-md-error role="alert" hidden/);
+  assert.match(html, /data-md-render/);
+  assert.match(html, /data-md-empty/);
+  assert.match(html, /data-md-remove/);
+  assert.doesNotMatch(html, /onclick=|<script(?![^>]* src=)/i);
+});
+
+test('MD Viewer client validation mirrors the documented browser limits', () => {
+  assert.equal(validateMdViewerFile({ name: 'notes.md', size: 10 }).ok, true);
+  assert.equal(validateMdViewerFile({ name: 'notes.MARKDOWN', size: 10 }).ok, true);
+  const badExt = validateMdViewerFile({ name: 'notes.txt', size: 10 });
+  assert.equal(badExt.ok, false);
+  assert.match(badExt.message, /only \.md and \.markdown/);
+  const emptyFile = validateMdViewerFile({ name: 'empty.md', size: 0 });
+  assert.equal(emptyFile.ok, false);
+  assert.match(emptyFile.message, /empty/);
+  assert.equal(validateMdViewerFile({ name: 'limit.md', size: MAX_FILE_BYTES }).ok, true);
+  const overLimit = validateMdViewerFile({ name: 'big.md', size: MAX_FILE_BYTES + 1 });
+  assert.equal(overLimit.ok, false);
+  assert.match(overLimit.message, /exceeds/);
+  assert.equal(validateMdViewerFile(null).ok, false);
 });
 
 test('random number registry metadata is active', () => {
@@ -773,6 +810,19 @@ function createFakeElement(tag) {
         return null;
       };
       return search(this);
+    },
+    querySelectorAll(selector) {
+      const match = /^\[([a-zA-Z0-9-]+)\]$/.exec(String(selector).trim());
+      const attr = match ? match[1] : null;
+      const results = [];
+      const walk = (node) => {
+        for (const child of node.children) {
+          if (attr && child.hasAttribute(attr)) results.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return results;
     }
   };
   return el;
@@ -928,4 +978,324 @@ test('pdf-maker closes download actions once a job is reported expired mid-poll'
     }
     assert.equal(h.convert.disabled, false, 'the user must be able to retry conversion after an expired job is closed');
   });
+});
+
+function buildMdViewerSurface() {
+  const surface = createFakeElement('section');
+  const input = createFakeElement('input'); input.setAttribute('data-md-input', '');
+  const drop = createFakeElement('div'); drop.setAttribute('data-md-drop', '');
+  const error = createFakeElement('div'); error.setAttribute('data-md-error', ''); error.hidden = true;
+  const live = createFakeElement('p'); live.setAttribute('data-md-live', '');
+  const work = createFakeElement('section'); work.setAttribute('data-md-work', ''); work.hidden = true;
+  const summary = createFakeElement('p'); summary.setAttribute('data-md-summary', '');
+  const removeButton = createFakeElement('button'); removeButton.setAttribute('data-md-remove', '');
+  const renderEl = createFakeElement('article'); renderEl.setAttribute('data-md-render', '');
+  const empty = createFakeElement('div'); empty.setAttribute('data-md-empty', '');
+  work.append(summary, removeButton, renderEl);
+  surface.append(input, drop, error, live, work, empty);
+  return { surface, input, drop, error, live, work, summary, removeButton, renderEl, empty };
+}
+
+test('md-viewer reads a selected file immediately, without any network calls', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    initMdViewer(h.surface, { renderMarkdown: (text) => '<p>' + text + '</p>' });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => { throw new Error('md-viewer must not perform network requests'); };
+    try {
+      const file = new File(['# hello'], 'notes.md', { type: 'text/markdown' });
+      h.input.files = [file];
+      await fire(h.input, 'change');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(h.work.hidden, false);
+    assert.equal(h.empty.hidden, true);
+    assert.equal(h.error.hidden, true);
+    assert.match(h.summary.textContent, /notes\.md/);
+    assert.match(h.live.textContent, /notes\.md rendered/);
+  });
+});
+
+test('md-viewer rejects unsupported, empty and oversized files with a recoverable error', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    initMdViewer(h.surface, { renderMarkdown: (text) => '<p>' + text + '</p>' });
+
+    h.input.files = [new File(['hi'], 'notes.txt')];
+    await fire(h.input, 'change');
+    assert.equal(h.error.hidden, false);
+    assert.match(h.error.textContent, /only \.md and \.markdown/);
+    assert.equal(h.work.hidden, true);
+    assert.equal(h.empty.hidden, false);
+
+    h.input.files = [new File([], 'empty.md')];
+    await fire(h.input, 'change');
+    assert.match(h.error.textContent, /empty/);
+
+    h.input.files = [new File([new Uint8Array(MAX_FILE_BYTES + 1)], 'big.md')];
+    await fire(h.input, 'change');
+    assert.match(h.error.textContent, /exceeds/);
+
+    h.input.files = [new File(['# ok'], 'ok.md')];
+    await fire(h.input, 'change');
+    assert.equal(h.error.hidden, true);
+    assert.equal(h.work.hidden, false);
+    assert.match(h.summary.textContent, /ok\.md/);
+  });
+});
+
+test('md-viewer surfaces a read failure and lets the user try another file', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    const readFile = () => Promise.reject(new Error('boom'));
+    initMdViewer(h.surface, { readFile, renderMarkdown: (text) => '<p>' + text + '</p>' });
+    h.input.files = [new File(['# hi'], 'notes.md')];
+    await fire(h.input, 'change');
+    assert.equal(h.error.hidden, false);
+    assert.match(h.error.textContent, /could not be read/);
+    assert.equal(h.work.hidden, true);
+    assert.equal(h.empty.hidden, false);
+  });
+});
+
+test('md-viewer discards a stale read when a newer file is selected before the old one resolves', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    const pending = [];
+    const readFile = (file) => new Promise((resolve) => pending.push({ file, resolve }));
+    initMdViewer(h.surface, { readFile, renderMarkdown: (text) => '<p>' + text + '</p>' });
+
+    h.input.files = [new File(['first'], 'first.md')];
+    const firstChange = fire(h.input, 'change');
+    h.input.files = [new File(['second'], 'second.md')];
+    const secondChange = fire(h.input, 'change');
+
+    assert.equal(pending.length, 2);
+    pending[1].resolve('second content');
+    await secondChange;
+    assert.match(h.summary.textContent, /second\.md/);
+
+    pending[0].resolve('first content');
+    await firstChange;
+    assert.match(h.summary.textContent, /second\.md/);
+    assert.doesNotMatch(h.summary.textContent, /first\.md/);
+  });
+});
+
+test('md-viewer\'s remove control clears rendered output, error and summary back to the empty state', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    initMdViewer(h.surface, { renderMarkdown: (text) => '<p>' + text + '</p>' });
+    h.input.files = [new File(['# hi'], 'notes.md')];
+    await fire(h.input, 'change');
+    assert.equal(h.work.hidden, false);
+
+    await fire(h.removeButton, 'click');
+    assert.equal(h.work.hidden, true);
+    assert.equal(h.empty.hidden, false);
+    assert.equal(h.summary.textContent, '');
+    assert.match(h.live.textContent, /removed/i);
+  });
+});
+
+test('md-viewer accepts a dropped file and toggles the dragging indicator', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    initMdViewer(h.surface, { renderMarkdown: (text) => '<p>' + text + '</p>' });
+    await fire(h.drop, 'dragenter');
+    assert.equal(h.drop.classList.contains('is-dragging'), true);
+    await fire(h.drop, 'drop', { dataTransfer: { files: [new File(['# hi'], 'dropped.md')] } });
+    assert.equal(h.drop.classList.contains('is-dragging'), false);
+    assert.match(h.summary.textContent, /dropped\.md/);
+    assert.equal(h.work.hidden, false);
+  });
+});
+
+test('md-viewer code block copy button announces success and failure', async () => {
+  const dom = new JSDOM('<!doctype html><body></body>');
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  try {
+    const container = document.createElement('div');
+    container.innerHTML = mdViewerModule.render();
+    const surface = container.firstElementChild;
+    let writeResult = () => Promise.resolve();
+    const clipboard = { writeText: () => writeResult() };
+    initMdViewer(surface, { clipboard, renderMarkdown: () => '<pre><code>const x = 1;</code></pre>' });
+
+    const input = surface.querySelector('[data-md-input]');
+    const file = new File(['ignored'], 'notes.md', { type: 'text/markdown' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new dom.window.Event('change'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const copyButton = surface.querySelector('[data-md-copy]');
+    assert.ok(copyButton, 'expected a copy button on the rendered code block');
+    const live = surface.querySelector('[data-md-live]');
+
+    copyButton.dispatchEvent(new dom.window.Event('click'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(live.textContent, /copied/i);
+
+    writeResult = () => Promise.reject(new Error('denied'));
+    copyButton.dispatchEvent(new dom.window.Event('click'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(live.textContent, /failed/i);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('md-viewer copy button announces failure instead of throwing when the Clipboard API is unavailable', async () => {
+  const dom = new JSDOM('<!doctype html><body></body>');
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  try {
+    const container = document.createElement('div');
+    container.innerHTML = mdViewerModule.render();
+    const surface = container.firstElementChild;
+    initMdViewer(surface, { clipboard: undefined, renderMarkdown: () => '<pre><code>const x = 1;</code></pre>' });
+
+    const input = surface.querySelector('[data-md-input]');
+    const file = new File(['ignored'], 'notes.md', { type: 'text/markdown' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new dom.window.Event('change'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const copyButton = surface.querySelector('[data-md-copy]');
+    assert.ok(copyButton, 'expected a copy button on the rendered code block');
+    const live = surface.querySelector('[data-md-live]');
+
+    assert.doesNotThrow(() => copyButton.dispatchEvent(new dom.window.Event('click')));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(live.textContent, /failed/i);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('md-viewer copy button announces failure when writeText is not a function', async () => {
+  const dom = new JSDOM('<!doctype html><body></body>');
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  try {
+    const container = document.createElement('div');
+    container.innerHTML = mdViewerModule.render();
+    const surface = container.firstElementChild;
+    initMdViewer(surface, { clipboard: {}, renderMarkdown: () => '<pre><code>const x = 1;</code></pre>' });
+
+    const input = surface.querySelector('[data-md-input]');
+    const file = new File(['ignored'], 'notes.md', { type: 'text/markdown' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new dom.window.Event('change'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const copyButton = surface.querySelector('[data-md-copy]');
+    const live = surface.querySelector('[data-md-live]');
+
+    assert.doesNotThrow(() => copyButton.dispatchEvent(new dom.window.Event('click')));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(live.textContent, /failed/i);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('renderMarkdownToSafeHtml strips scripts, handlers and dangerous URLs while preserving safe Markdown', () => {
+  const dom = new JSDOM('<!doctype html><body></body>');
+  const markdown = [
+    '# Title',
+    '',
+    'Some **bold** and *italic* text with `inline code`.',
+    '',
+    '- one',
+    '- two',
+    '',
+    '> a quote',
+    '',
+    '| a | b |',
+    '| - | - |',
+    '| 1 | 2 |',
+    '',
+    '```js',
+    'const x = 1;',
+    '```',
+    '',
+    '[safe link](https://example.com "t")',
+    '',
+    '![safe image](https://example.com/a.png)',
+    '',
+    '[xss](javascript:alert(1))',
+    '',
+    '![xss](data:text/html,evil)',
+    '',
+    '![relative](./local.png)',
+    '',
+    '[relative](./notes.md)',
+    '',
+    '<script>alert(1)</script>',
+    '',
+    '<img src=x onerror="alert(1)">',
+    '',
+    '<iframe src="https://evil.example"></iframe>',
+    '',
+    '<div onclick="alert(1)">click me</div>',
+    '',
+    '<a href="https://raw.example">raw external link</a>',
+    '',
+    '<a href="https://raw.example" rel="opener" target="_self">raw link with unsafe rel</a>',
+    '',
+    '<a href=" https://raw.example" rel="opener" target="_self">raw link with leading space href</a>',
+    ''
+  ].join('\n');
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error('renderMarkdownToSafeHtml must not perform network requests'); };
+  let html;
+  try {
+    html = renderMarkdownToSafeHtml(markdown, { window: dom.window });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(html, /<h1>Title<\/h1>/);
+  assert.match(html, /<strong>bold<\/strong>/);
+  assert.match(html, /<em>italic<\/em>/);
+  assert.match(html, /<code>inline code<\/code>/);
+  assert.match(html, /<li>one<\/li>/);
+  assert.match(html, /<blockquote>/);
+  assert.match(html, /<table>/);
+  assert.match(html, /class="language-js"/);
+  assert.match(html, /<a href="https:\/\/example\.com" title="t" rel="noopener noreferrer" target="_blank">safe link<\/a>/);
+  assert.match(html, /<img src="https:\/\/example\.com\/a\.png" alt="safe image" loading="lazy">/);
+
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /onerror=/i);
+  assert.doesNotMatch(html, /onclick=/i);
+  assert.doesNotMatch(html, /<iframe/i);
+  assert.doesNotMatch(html, /javascript:/i);
+  assert.doesNotMatch(html, /data:text\/html/i);
+  assert.doesNotMatch(html, /href="\.\/notes\.md"/);
+  assert.doesNotMatch(html, /src="\.\/local\.png"/);
+  assert.match(html, /md-unsupported-ref/);
+
+  const rawLink = html.match(/<a[^>]*>raw external link<\/a>/)?.[0];
+  assert.ok(rawLink, 'expected the raw HTML external link to survive sanitization');
+  assert.match(rawLink, /rel="noopener noreferrer"/);
+  assert.match(rawLink, /target="_blank"/);
+
+  const rawLinkUnsafeRel = html.match(/<a[^>]*>raw link with unsafe rel<\/a>/)?.[0];
+  assert.ok(rawLinkUnsafeRel, 'expected the raw HTML link with an unsafe rel to survive sanitization');
+  assert.match(rawLinkUnsafeRel, /rel="noopener noreferrer"/);
+  assert.match(rawLinkUnsafeRel, /target="_blank"/);
+  assert.doesNotMatch(rawLinkUnsafeRel, /rel="opener"/);
+  assert.doesNotMatch(rawLinkUnsafeRel, /target="_self"/);
+
+  const rawLinkLeadingSpaceHref = html.match(/<a[^>]*>raw link with leading space href<\/a>/)?.[0];
+  assert.ok(rawLinkLeadingSpaceHref, 'expected the raw HTML link with a leading-space href to survive sanitization');
+  assert.match(rawLinkLeadingSpaceHref, /rel="noopener noreferrer"/);
+  assert.match(rawLinkLeadingSpaceHref, /target="_blank"/);
+  assert.doesNotMatch(rawLinkLeadingSpaceHref, /rel="opener"/);
+  assert.doesNotMatch(rawLinkLeadingSpaceHref, /target="_self"/);
 });
