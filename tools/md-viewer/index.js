@@ -21,6 +21,9 @@ export function render() {
       <div class="md-render-wrap">
         <article class="md-render" data-md-render aria-label="Rendered Markdown"></article>
       </div>
+      <button class="md-back-to-top" type="button" data-md-back-to-top aria-label="Back to top">
+        <span aria-hidden="true">↑</span> Top
+      </button>
     </section>
     <div class="md-empty" data-md-empty>
       <p>No file selected yet. Drop a <code>.md</code> or <code>.markdown</code> file above, or choose one, to see it rendered here.</p>

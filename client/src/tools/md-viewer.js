@@ -118,6 +118,7 @@ export function initMdViewer(surface, options = {}) {
   const live = q('[data-md-live]');
   const renderEl = q('[data-md-render]');
   const removeButton = q('[data-md-remove]');
+  const backToTopButton = q('[data-md-back-to-top]');
   if (!input || !drop || !renderEl || !work || !empty) return;
 
   let requestSerial = 0;
@@ -192,6 +193,10 @@ export function initMdViewer(surface, options = {}) {
   document.addEventListener('dragover', (event) => event.preventDefault());
   document.addEventListener('drop', (event) => { if (!drop.contains(event.target)) event.preventDefault(); });
   removeButton?.addEventListener('click', () => { reset(); announce('File removed.'); });
+  backToTopButton?.addEventListener('click', () => {
+    const scrollTo = options.scrollTo || ((scrollOptions) => window.scrollTo(scrollOptions));
+    scrollTo({ top: 0, behavior: 'smooth' });
+  });
 
   showEmpty();
 }

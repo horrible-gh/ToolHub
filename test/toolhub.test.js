@@ -990,10 +990,11 @@ function buildMdViewerSurface() {
   const summary = createFakeElement('p'); summary.setAttribute('data-md-summary', '');
   const removeButton = createFakeElement('button'); removeButton.setAttribute('data-md-remove', '');
   const renderEl = createFakeElement('article'); renderEl.setAttribute('data-md-render', '');
+  const backToTopButton = createFakeElement('button'); backToTopButton.setAttribute('data-md-back-to-top', '');
   const empty = createFakeElement('div'); empty.setAttribute('data-md-empty', '');
-  work.append(summary, removeButton, renderEl);
+  work.append(summary, removeButton, renderEl, backToTopButton);
   surface.append(input, drop, error, live, work, empty);
-  return { surface, input, drop, error, live, work, summary, removeButton, renderEl, empty };
+  return { surface, input, drop, error, live, work, summary, removeButton, renderEl, backToTopButton, empty };
 }
 
 test('md-viewer reads a selected file immediately, without any network calls', async () => {
@@ -1110,6 +1111,31 @@ test('md-viewer accepts a dropped file and toggles the dragging indicator', asyn
     assert.match(h.summary.textContent, /dropped\.md/);
     assert.equal(h.work.hidden, false);
   });
+});
+
+test('md-viewer floating button scrolls smoothly to the top after a file is rendered', async () => {
+  await withPdfMakerDocument(async () => {
+    const h = buildMdViewerSurface();
+    const scrollCalls = [];
+    initMdViewer(h.surface, {
+      renderMarkdown: (text) => '<p>' + text + '</p>',
+      scrollTo: (options) => scrollCalls.push(options)
+    });
+
+    h.input.files = [new File(['# hi'], 'long-notes.md')];
+    await fire(h.input, 'change');
+    assert.equal(h.work.hidden, false);
+
+    await fire(h.backToTopButton, 'click');
+    assert.deepEqual(scrollCalls, [{ top: 0, behavior: 'smooth' }]);
+  });
+});
+
+test('md-viewer renders an accessible floating back-to-top control', () => {
+  const html = mdViewerModule.render();
+  assert.match(html, /class="md-back-to-top"/);
+  assert.match(html, /data-md-back-to-top/);
+  assert.match(html, /aria-label="Back to top"/);
 });
 
 test('md-viewer code block copy button announces success and failure', async () => {
