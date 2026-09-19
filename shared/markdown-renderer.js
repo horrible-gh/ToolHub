@@ -78,8 +78,8 @@ const PDF_RESOURCE_ATTRS = new Set([
 
 export const PDF_MARKDOWN_CSS = [
   'html { font-family: sans-serif; font-size: 11pt; line-height: 1.5; color: #1f2933; }',
-  'body { margin: 18mm; }',
-  '.md-render { max-width: 100%; overflow-wrap: break-word; }',
+  'body { margin: 0 18mm 18mm; }',
+  '.md-render { max-width: 100%; overflow-wrap: break-word; padding-top: 18mm; }',
   '.md-render h1, .md-render h2, .md-render h3, .md-render h4, .md-render h5, .md-render h6 { margin: 1.2em 0 0.5em; line-height: 1.25; page-break-after: avoid; }',
   '.md-render p, .md-render ul, .md-render ol, .md-render blockquote, .md-render pre, .md-render table { margin: 0 0 0.9em; }',
   '.md-render ul, .md-render ol { padding-left: 1.8em; }',

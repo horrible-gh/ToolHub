@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter, once } from 'node:events';
 import { spawn } from 'node:child_process';
+import zlib from 'node:zlib';
 import { createApp } from '../server/app.js';
 import { defaultLibreOfficePath, loadConfig } from '../server/config.js';
 import { inspectMarkdown, inspectOoxml, libreOfficeConverter, makeZip, officeConverter } from '../server/pdf-maker.js';
@@ -45,6 +46,39 @@ function findLibreOfficeExecutable() {
   const candidate = defaultLibreOfficePath();
   if (path.isAbsolute(candidate)) return fsSync.existsSync(candidate) ? candidate : null;
   return process.platform === 'win32' ? null : candidate;
+}
+// LibreOffice's Writer/Web HTML import gives each source line its own BT..ET text object with
+// a single absolute "x y Td" position (confirmed by decompiling this pipeline's own generated
+// PDF content streams), so the vertical line-to-line gap is the difference between consecutive
+// lines' Td y-values within the same (FlateDecode-compressed) content stream -- which is
+// exactly what the body-top-margin regression inflates.
+function analyzeTextLineAdvances(pdfBuffer) {
+  const pdfText = pdfBuffer.toString('latin1');
+  const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let maxGap = 0;
+  let lineCount = 0;
+  let match;
+  while ((match = streamPattern.exec(pdfText))) {
+    let content;
+    try {
+      content = zlib.inflateSync(Buffer.from(match[1], 'latin1')).toString('latin1');
+    } catch {
+      continue;
+    }
+    if (!content.includes('BT') || !content.includes('Td')) continue;
+    const yPositions = [];
+    for (const block of content.split('BT').slice(1)) {
+      const body = block.split('ET')[0];
+      const lineMatch = body.match(/(-?[\d.]+)\s+(-?[\d.]+)\s+Td\b/);
+      if (lineMatch) yPositions.push(Number(lineMatch[2]));
+    }
+    lineCount += yPositions.length;
+    for (let index = 1; index < yPositions.length; index += 1) {
+      const gap = Math.abs(yPositions[index - 1] - yPositions[index]);
+      if (gap > maxGap) maxGap = gap;
+    }
+  }
+  return { maxGap, lineCount };
 }
 const encryptedOfficeContainer = () => {
   const header = Buffer.alloc(512, 0); const directory = Buffer.alloc(512, 0); const fat = Buffer.alloc(512, 0xff);
@@ -507,4 +541,44 @@ test('LibreOffice headless conversion produces a valid PDF from a Markdown fixtu
   assert.equal(download.status, 200);
   assert.equal(produced.subarray(0, 5).toString(), '%PDF-');
   assert.ok(produced.includes(Buffer.from('%%EOF')));
+});
+
+test('LibreOffice headless conversion keeps fenced code/text block line spacing from regressing to the pre-fix body-top-margin gap', async (t) => {
+  const executable = findLibreOfficeExecutable();
+  if (!executable) {
+    t.skip(`no LibreOffice headless binary found at the configured runtime path: ${defaultLibreOfficePath()}`);
+    return;
+  }
+  const markdown = [
+    'Paragraph A',
+    '',
+    '```text',
+    'line A',
+    'line B',
+    'line C',
+    '```',
+    '',
+    'Paragraph B',
+    ''
+  ].join('\n');
+  const { base } = await harness(t, { config: { libreOfficePath: executable, timeoutMs: 60000 } });
+  const response = await submit(base, [['fence-spacing.md', Buffer.from(markdown, 'utf8')]]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json();
+  const status = await finished(base, accepted, 1000);
+  assert.equal(status.status, 'succeeded');
+  const download = await fetch(`${base}/api/pdf-maker/jobs/${status.jobId}/files/${status.files[0].id}`, { headers: { Authorization: `Bearer ${accepted.accessToken}` } });
+  const produced = Buffer.from(await download.arrayBuffer());
+  assert.equal(download.status, 200);
+  assert.equal(produced.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(produced.includes(Buffer.from('%%EOF')));
+  const { maxGap, lineCount } = analyzeTextLineAdvances(produced);
+  // Paragraph A + 3 pre lines + Paragraph B each render as their own text line; fewer than 5
+  // would mean the 3-line fenced block collapsed into fewer lines during conversion.
+  assert.ok(lineCount >= 5, `expected at least 5 rendered text lines (2 paragraphs + 3 pre lines), got ${lineCount}`);
+  // Investigation (toolhub.tools-webserver.0007.0012-NR) measured ~11.35-28.35pt for normal
+  // paragraph/pre-internal transitions and ~62.35-76.95pt once the removed body top margin
+  // (18mm =~ 51.02pt) leaks into every pre-internal paragraph break. 35pt sits with margin
+  // above the normal ceiling and well below the regressed floor.
+  assert.ok(maxGap < 35, `expected max line-to-line advance under 35pt, got ${maxGap}`);
 });
